@@ -187,6 +187,29 @@ This command trains jointly on all 50 target/human tasks. Adjust GPU count,
 per-device batch size, learning rate, and schedule for the actual cluster
 instead of treating the example values as a published reference run.
 
+### SmolVLA baseline
+
+`starvla_smolvla_robocasa365.yaml` fine-tunes SmolVLA (framework `SmolVLA`,
+initialized from `lerobot/smolvla_base`) with all three cameras and the
+proprioceptive state. Both launchers accept `CONFIG_YAML` and `MODEL_TAG`:
+
+```bash
+conda activate starVLA
+CONFIG_YAML=examples/simBenchmarks/Robocasa_365/train_files/starvla_smolvla_robocasa365.yaml \
+MODEL_TAG=smolvla NUM_GPUS=8 \
+  bash examples/simBenchmarks/Robocasa_365/train_files/run_robocasa365_all.sh
+```
+
+At evaluation time send the same three views, in training order:
+
+```bash
+IMAGE_KEYS="video.robot0_agentview_left video.robot0_agentview_right video.robot0_eye_in_hand" \
+  bash examples/simBenchmarks/Robocasa_365/eval_files/run_eval.sh client
+```
+
+The model raises an error if the number of views differs from
+`framework.smolvla.num_images`.
+
 ## 5. Evaluation
 
 Run the policy server and simulator client from the StarVLA repository root in

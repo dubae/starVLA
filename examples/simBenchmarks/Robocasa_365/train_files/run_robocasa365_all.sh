@@ -37,6 +37,9 @@ fi
 NUM_GPUS=${NUM_GPUS:-$(python -c "import torch;print(torch.cuda.device_count())")}
 
 # ---- training knobs (edit here) ----
+# Model config; e.g. CONFIG_YAML=.../starvla_smolvla_robocasa365.yaml MODEL_TAG=smolvla
+CONFIG_YAML=${CONFIG_YAML:-./examples/simBenchmarks/Robocasa_365/train_files/starvla_qwenoft_robocasa365.yaml}
+MODEL_TAG=${MODEL_TAG:-qwenoft}
 MIXTURE=robocasa365_target_human_all   # also: robocasa365_atomic_target_human_all / robocasa365_composite_target_human_all
 BATCH=8
 MAX_STEPS=200000
@@ -45,7 +48,7 @@ EVAL_EVERY=2000
 LOG_EVERY=100
 
 run_root_dir=./playground/Checkpoints
-run_id=robocasa365_qwenoft_${MIXTURE}
+run_id=robocasa365_${MODEL_TAG}_${MIXTURE}
 output_dir=${run_root_dir}/${run_id}
 mkdir -p "${output_dir}"
 cp "$0" "${output_dir}/"
@@ -54,7 +57,7 @@ accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
   --num_processes "${NUM_GPUS}" \
   starVLA/training/train_starvla.py \
-  --config_yaml ./examples/simBenchmarks/Robocasa_365/train_files/starvla_qwenoft_robocasa365.yaml \
+  --config_yaml "${CONFIG_YAML}" \
   --datasets.vla_data.data_mix "${MIXTURE}" \
   --datasets.vla_data.per_device_batch_size "${BATCH}" \
   --trainer.max_train_steps "${MAX_STEPS}" \

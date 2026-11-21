@@ -141,6 +141,9 @@ class Args:
         "playground/Checkpoints/robocasa365_qwenoft_OpenDrawer_100step/checkpoints/steps_100_pytorch_model.pt"
     )
     unnorm_key: Optional[str] = None
+    # Camera views sent to the policy, in order; must match training (SmolVLA YAML uses all three:
+    # video.robot0_agentview_left video.robot0_agentview_right video.robot0_eye_in_hand).
+    image_keys: Tuple[str, ...] = ("video.robot0_agentview_left",)
 
 
 def main(args: Args) -> None:
@@ -152,6 +155,7 @@ def main(args: Args) -> None:
         port=args.port,
         image_size=args.resize_size,
         n_action_steps=args.n_action_steps,
+        image_keys=args.image_keys,
     )
     cfg = SimulationConfig(
         env_name=args.env_name,

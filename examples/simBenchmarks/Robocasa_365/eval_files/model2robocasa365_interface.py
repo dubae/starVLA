@@ -6,7 +6,7 @@ but adapted to the single-arm 12-d action / 16-d state layout produced by
 """
 
 from collections import deque
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import cv2 as cv
 import numpy as np
@@ -52,9 +52,12 @@ class PolicyWarper:
         adaptive_ensemble_alpha: float = 0.1,
         use_ddim: bool = True,
         num_ddim_steps: int = 10,
+        image_keys: Sequence[str] = ("video.robot0_agentview_left",),
     ) -> None:
         self.client = WebsocketClientPolicy(host, port)
         self.unnorm_key = unnorm_key
+        # Camera views sent to the policy, in order. Must match the training views.
+        self.image_keys = tuple(image_keys)
         self.image_size = tuple(image_size)
         self.n_action_steps = n_action_steps
         self.use_ddim = use_ddim
@@ -89,10 +92,12 @@ class PolicyWarper:
         if instructions[0] != self.task_description:
             self.reset(instructions[0])
 
-        # 2) image — the tabletop multi-view env returns (B, n_obs, H, W, 3); we use the
-        # left agentview (the same one used during training).
-        view = observations["video.robot0_agentview_left"]  # (B, 1, H, W, 3)
-        images = [[self._resize_image(img) for img in sample] for sample in view]
+        # 2) image — each view is (B, n_obs, H, W, 3); views are concatenated in
+        # `self.image_keys` order (default: left agentview only).
+        images = [
+            [self._resize_image(img) for key in self.image_keys for img in observations[key][b]]
+            for b in range(len(observations[self.image_keys[0]]))
+        ]
 
         # 3) state — concatenate parts in the same order as in training
         state_parts = [observations[k] for k in STATE_KEY_ORDER]  # each (B, 1, d)

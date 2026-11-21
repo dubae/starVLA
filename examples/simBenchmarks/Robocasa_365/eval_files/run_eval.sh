@@ -10,6 +10,9 @@ N_EPISODES=${N_EPISODES:-5}
 N_ENVS=${N_ENVS:-1}
 MAX_STEPS=${MAX_STEPS:-500}
 N_ACT=${N_ACT:-8}
+# Space-separated camera views sent to the policy (must match training), e.g. for SmolVLA:
+#   IMAGE_KEYS="video.robot0_agentview_left video.robot0_agentview_right video.robot0_eye_in_hand"
+IMAGE_KEYS=${IMAGE_KEYS:-video.robot0_agentview_left}
 
 case "${1:-}" in
   server)
@@ -21,14 +24,15 @@ case "${1:-}" in
     ;;
   client)
     # Run inside the `robocasa365` env
-    exec python -m examples.Robocasa_365.eval_files.simulation_env \
+    exec python -m examples.simBenchmarks.Robocasa_365.eval_files.simulation_env \
       --args.pretrained-path "${CKPT}" \
       --args.env-name "${ENV_NAME}" \
       --args.port "${PORT}" \
       --args.n-episodes "${N_EPISODES}" \
       --args.n-envs "${N_ENVS}" \
       --args.max-episode-steps "${MAX_STEPS}" \
-      --args.n-action-steps "${N_ACT}"
+      --args.n-action-steps "${N_ACT}" \
+      --args.image-keys ${IMAGE_KEYS}
     ;;
   *)
     cat <<USAGE
@@ -38,7 +42,7 @@ Usage:
   # terminal 2 (conda env robocasa365):
   bash examples/simBenchmarks/Robocasa_365/eval_files/run_eval.sh client
 
-Override defaults with env vars: CKPT, ENV_NAME, PORT, N_EPISODES, N_ENVS, MAX_STEPS, N_ACT.
+Override defaults with env vars: CKPT, ENV_NAME, PORT, N_EPISODES, N_ENVS, MAX_STEPS, N_ACT, IMAGE_KEYS.
 USAGE
     ;;
 esac
