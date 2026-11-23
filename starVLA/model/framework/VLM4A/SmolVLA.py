@@ -72,6 +72,10 @@ class SmolVLADefaultConfig:
             "min_period": 4e-3,
             "max_period": 4.0,
             "add_image_special_tokens": False,
+            # Mask out views whose pixels are all zero (a camera slot this embodiment does not
+            # have), like LeRobot's padded "empty cameras": the slot keeps its position but the
+            # VLM / expert never attend to its tokens.
+            "mask_blank_images": False,
         }
     )
 
@@ -137,6 +141,7 @@ class SmolVLA(baseframework):
         self.max_period = float(sc.max_period)
         self.prefix_length = int(sc.prefix_length)
         self.add_image_special_tokens = bool(sc.add_image_special_tokens)
+        self.mask_blank_images = bool(sc.get("mask_blank_images", False))
         if self.action_dim > self.max_action_dim:
             raise ValueError(f"action_dim={self.action_dim} exceeds max_action_dim={self.max_action_dim}")
 
@@ -244,9 +249,13 @@ class SmolVLA(baseframework):
         for view_idx in range(num_views):
             batch = np.stack([np.asarray(views[view_idx].convert("RGB")) for views in per_example])
             img = torch.from_numpy(batch).to(self._device).permute(0, 3, 1, 2).float() / 255.0
+            if self.mask_blank_images:
+                mask = img.flatten(1).amax(dim=1) > 0  # all-black view -> empty camera slot
+            else:
+                mask = torch.ones(len(examples), dtype=torch.bool, device=self._device)
             img = resize_with_pad(img, height, width, pad_value=0)
             images.append(img * 2.0 - 1.0)  # SigLIP expects [-1, 1]
-            img_masks.append(torch.ones(len(examples), dtype=torch.bool, device=self._device))
+            img_masks.append(mask)
         return images, img_masks
 
     def _prepare_language(self, examples: list[dict]):

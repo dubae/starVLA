@@ -89,6 +89,25 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
     return optimizer, lr_scheduler
 
 
+def apply_trainable_param_regex(model, cfg):
+    """``trainer.trainable_param_regex``: keep ``requires_grad`` only on parameters whose
+    name matches the regex (``re.search``); everything else is frozen. Parameters the
+    framework already froze stay frozen. Call before building the optimizer."""
+    pattern = cfg.trainer.get("trainable_param_regex", None)
+    if not pattern:
+        return model
+    regex = re.compile(pattern)
+    kept = 0
+    for name, param in model.named_parameters():
+        param.requires_grad = bool(param.requires_grad and regex.search(name))
+        kept += param.numel() if param.requires_grad else 0
+    if kept == 0:
+        raise ValueError(f"trainer.trainable_param_regex={pattern!r} matches no trainable parameter")
+    if _dist_rank() == 0:
+        print(f"🔓 trainable_param_regex={pattern!r}: {kept / 1e6:.2f}M trainable parameters")
+    return model
+
+
 def build_param_lr_groups(model, cfg):
     """
     build multiple param groups based on cfg.trainer.learning_rate.
@@ -133,7 +152,7 @@ def build_param_lr_groups(model, cfg):
             for attr in module_name.split("."):
                 module = getattr(module, attr)
             # filter out frozen parameters
-            params = [p for p in module.parameters() if id(p) not in frozen_params]
+            params = [p for p in module.parameters() if id(p) not in frozen_params and p.requires_grad]
             if params:  # only add param group if there are trainable parameters
                 param_groups.append({"params": params, "lr": lr, "name": module_name})
                 used_params.update(id(p) for p in params)
@@ -141,7 +160,10 @@ def build_param_lr_groups(model, cfg):
             ReferenceError(f"⚠️ module path `{module_name}` not found in vla")
 
     # assign base learning rate to the remaining unused parameters (exclude frozen ones)
-    other_params = [p for p in model.parameters() if id(p) not in used_params and id(p) not in frozen_params]
+    other_params = [
+        p for p in model.parameters()
+        if id(p) not in used_params and id(p) not in frozen_params and p.requires_grad
+    ]
     if other_params:
         param_groups.append({"params": other_params, "lr": base_lr, "name": "base"})
 
