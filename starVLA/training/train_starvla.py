@@ -431,9 +431,9 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 self.lr_scheduler.step()
 
-        return {
-            "action_dit_loss": action_loss.item(),
-        }
+        step_metrics = {"action_dit_loss": action_loss.item()}
+        step_metrics.update(output_dict.get("metrics", {}))  # optional framework diagnostics
+        return step_metrics
 
     def _finalize_training(self):
         """Training end processing."""

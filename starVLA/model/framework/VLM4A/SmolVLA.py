@@ -76,6 +76,15 @@ class SmolVLADefaultConfig:
             # have), like LeRobot's padded "empty cameras": the slot keeps its position but the
             # VLM / expert never attend to its tokens.
             "mask_blank_images": False,
+            # Training objective: "flow_matching" (LeRobot SmolVLA) or "drift" (Drifting Models,
+            # arXiv 2602.04770): the expert becomes a one-step generator a = eps - v(eps, t=1),
+            # trained with the drifting loss on raw (normalized) action chunks; inference is 1 NFE.
+            "objective": "flow_matching",
+            "drift_num_gen": 16,  # generated chunks per observation (they are also the negatives)
+            "drift_R_list": [0.02, 0.05, 0.2],  # kernel temperatures
+            # torch.compile the VLM / expert passes of the drift objective in training (static
+            # shapes; ~25% faster step). Inference always runs eagerly. Needs a C compiler (CC).
+            "torch_compile": False,
         }
     )
 
@@ -142,6 +151,13 @@ class SmolVLA(baseframework):
         self.prefix_length = int(sc.prefix_length)
         self.add_image_special_tokens = bool(sc.add_image_special_tokens)
         self.mask_blank_images = bool(sc.get("mask_blank_images", False))
+        self.objective = str(sc.get("objective", "flow_matching"))
+        if self.objective not in ("flow_matching", "drift"):
+            raise ValueError(f"[SmolVLA] unknown objective {self.objective!r}")
+        self.drift_num_gen = int(sc.get("drift_num_gen", 16))
+        self.drift_R_list = tuple(float(r) for r in sc.get("drift_R_list", (0.02, 0.05, 0.2)))
+        self.torch_compile = bool(sc.get("torch_compile", False))
+        self._compiled_fns = {}
         if self.action_dim > self.max_action_dim:
             raise ValueError(f"action_dim={self.action_dim} exceeds max_action_dim={self.max_action_dim}")
 
@@ -400,11 +416,79 @@ class SmolVLA(baseframework):
         v_t = self._velocity(suffix_out)
         return F.mse_loss(u_t, v_t, reduction="none")
 
+    # ------------------------------------------------------------------
+    # Drifting objective (one-step generator)
+    # ------------------------------------------------------------------
+    def _maybe_compiled(self, name: str):
+        """Bound ``vlm_with_expert`` method, torch.compile-d in training when enabled."""
+        fn = getattr(self.vlm_with_expert, name)
+        if not (self.torch_compile and self.training and torch.is_grad_enabled()):
+            return fn
+        if name not in self._compiled_fns:
+            self._compiled_fns[name] = torch.compile(fn, dynamic=False)
+        return self._compiled_fns[name]
+
+    def _prefill(self, images, img_masks, lang_tokens, lang_masks, state):
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        _, past_key_values = self._maybe_compiled("forward")(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+            fill_kv_cache=True,
+        )
+        return prefix_pad_masks, past_key_values
+
+    def generate_one_step(self, prefix_pad_masks, past_key_values, noise, num_gen: int = 1):
+        """a = eps - v(eps, t=1): one Euler step of the flow parameterization (1 NFE).
+
+        The prefix (VLM) is computed once per observation; its K/V are shared by the
+        ``num_gen`` noise draws of that observation (noise rows are grouped per observation).
+        """
+        time = torch.ones(noise.shape[0], dtype=torch.float32, device=noise.device)
+        suffix_embs, _, _ = self.embed_suffix(noise, time)
+        suffix_out = self._maybe_compiled("forward_expert_grouped")(
+            suffix_embs, prefix_pad_masks, past_key_values, num_gen=num_gen
+        )
+        return noise - self._velocity(suffix_out)
+
+    def compute_drift_loss(self, images, img_masks, lang_tokens, lang_masks, state, actions):
+        from starVLA.model.modules.action_model.drift_loss import drift_loss
+
+        bsize, num_gen = actions.shape[0], self.drift_num_gen
+        prefix_pad_masks, past_key_values = self._prefill(images, img_masks, lang_tokens, lang_masks, state)
+        noise = torch.randn(
+            bsize * num_gen, self.chunk_size, self.max_action_dim, dtype=torch.float32, device=actions.device
+        )
+        gen = self.generate_one_step(prefix_pad_masks, past_key_values, noise, num_gen=num_gen)
+        # Drift on the real action dims only, one sample = the whole flattened chunk.
+        gen = gen[:, :, : self.action_dim].float().reshape(bsize, num_gen, -1)
+        pos = actions[:, :, : self.action_dim].float().reshape(bsize, 1, -1)
+        loss, info = drift_loss(gen, pos, R_list=self.drift_R_list)
+
+        with torch.no_grad():
+            sq_err = ((gen - pos) ** 2).mean(-1)  # [B, G], per action dim
+            metrics = {f"drift/{k}": v for k, v in info.items()}
+            metrics["drift/mse_sample"] = sq_err.mean()  # E||a_gen - a_gt||^2 / dim
+            metrics["drift/mse_best_of_g"] = sq_err.min(dim=1).values.mean()
+            metrics["drift/mse_gen_mean"] = ((gen.mean(1, keepdim=True) - pos) ** 2).mean()
+            metrics["drift/gen_std"] = gen.std(dim=1).mean()  # spread across the G draws
+            values = torch.stack([v.float() for v in metrics.values()]).tolist()  # one host sync
+        return loss.mean(), dict(zip(metrics.keys(), values))
+
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, num_steps=None):
         bsize, device = state.shape[0], state.device
         num_steps = int(num_steps or self.num_steps)
         if noise is None:
             noise = torch.randn(bsize, self.chunk_size, self.max_action_dim, dtype=torch.float32, device=device)
+        if self.objective == "drift":
+            prefix_pad_masks, past_key_values = self._prefill(images, img_masks, lang_tokens, lang_masks, state)
+            return self.generate_one_step(prefix_pad_masks, past_key_values, noise)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks, state
@@ -454,6 +538,9 @@ class SmolVLA(baseframework):
         lang_tokens, lang_masks = self._prepare_language(examples)
         state = self._prepare_state(examples)
         actions = self._prepare_actions(examples)
+        if self.objective == "drift":
+            loss, metrics = self.compute_drift_loss(images, img_masks, lang_tokens, lang_masks, state, actions)
+            return {"action_loss": loss, "metrics": metrics}
         losses = self.compute_flow_loss(
             images,
             img_masks,
@@ -469,7 +556,8 @@ class SmolVLA(baseframework):
 
     @torch.inference_mode()
     def predict_action(self, examples: list[dict] | dict | None = None, **kwargs) -> dict:
-        """Extra kwargs from eval clients (e.g. ``use_ddim``) are ignored; ``num_steps`` overrides Euler steps."""
+        """Extra kwargs from eval clients (e.g. ``use_ddim``) are ignored; ``num_steps`` overrides Euler steps
+        (flow matching only; the drift objective always samples in one step)."""
         if not isinstance(examples, list):
             examples = [examples]
         images, img_masks = self._prepare_images(examples)

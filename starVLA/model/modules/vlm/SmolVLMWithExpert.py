@@ -477,6 +477,93 @@ class SmolVLMWithExpertModel(nn.Module):
             outputs_embeds.append(models[i].norm(hidden_states) if hidden_states is not None else None)
         return outputs_embeds, past_key_values
 
+    def forward_expert_grouped(self, suffix_embs, prefix_pad_masks, past_key_values, num_gen: int):
+        """Expert-only pass for ``num_gen`` suffixes per prefix, without repeating the prefix.
+
+        Equivalent to ``forward(inputs_embeds=[None, suffix], use_cache=True, fill_kv_cache=False)``
+        with every prefix K/V cache entry and pad mask ``repeat_interleave``-d ``num_gen`` times
+        (suffix rows grouped per prefix), but the prefix K/V (and, in cross-attention layers, the
+        expert's projections of them) are computed / stored once per prefix. Same numerics as
+        ``eager_attention_forward`` (fp32 scores, probabilities cast to the value dtype).
+
+        Args:
+            suffix_embs: [B * G, S, D_expert] action-token embeddings.
+            prefix_pad_masks: [B, L] valid prefix tokens.
+            past_key_values: prefill cache of the B prefixes (``fill_kv_cache=True``).
+        """
+        expert = self.lm_expert
+        model_layers = self.get_model_layers([self.get_vlm_model().text_model, expert])
+        B, L = prefix_pad_masks.shape
+        G = num_gen
+        BG, S, _ = suffix_embs.shape
+        assert BG == B * G, (BG, B, G)
+        H, KVH = self.num_attention_heads, self.num_key_value_heads
+        groups = H // KVH
+        head_dim = self.vlm.config.text_config.head_dim
+        device = suffix_embs.device
+
+        # Positions: self-attn layers continue after the valid prefix; cross-attn layers start at 0.
+        suffix_pos = torch.arange(S, device=device)[None, :]
+        self_pos = (prefix_pad_masks.sum(-1, keepdim=True) + suffix_pos).repeat_interleave(G, dim=0)  # [BG, S]
+        cross_pos = suffix_pos.expand(BG, S)
+        prefix_valid = prefix_pad_masks[:, None, None, None, None, :]  # [B,1,1,1,1,L]
+        causal = torch.ones(S, S, dtype=torch.bool, device=device).tril()  # action tokens: block-causal
+
+        def grouped_attention(q, k_pre, v_pre, k_suf=None, v_suf=None):
+            # q: [BG, S, H, d]; k_pre/v_pre: [B, L, KVH, d]; k_suf/v_suf: [BG, S, KVH, d]
+            qf = q.to(torch.float32).view(B, G, S, KVH, groups, head_dim).permute(0, 3, 1, 4, 2, 5)  # B,KVH,G,g,S,d
+            kp = k_pre.to(torch.float32).permute(0, 2, 3, 1)  # B,KVH,d,L
+            scores = torch.matmul(qf.reshape(B, KVH, G * groups * S, head_dim), kp)
+            scores = scores.view(B, KVH, G, groups, S, L).float() * head_dim**-0.5
+            big_neg = torch.finfo(torch.float32).min
+            scores = torch.where(prefix_valid, scores, big_neg)
+            if k_suf is not None:
+                ks = k_suf.to(torch.float32).view(B, G, S, KVH, head_dim).permute(0, 3, 1, 4, 2)  # B,KVH,G,d,S
+                s_suf = torch.matmul(qf.reshape(B, KVH, G, groups * S, head_dim), ks)
+                s_suf = s_suf.view(B, KVH, G, groups, S, S).float() * head_dim**-0.5
+                s_suf = torch.where(causal, s_suf, big_neg)
+                scores = torch.cat([scores, s_suf], dim=-1)
+            probs = torch.softmax(scores, dim=-1).to(v_pre.dtype)
+            out = torch.matmul(
+                probs[..., :L].reshape(B, KVH, G * groups * S, L), v_pre.permute(0, 2, 1, 3)
+            ).view(B, KVH, G, groups, S, head_dim)
+            if k_suf is not None:
+                vs = v_suf.view(B, G, S, KVH, head_dim).permute(0, 3, 1, 2, 4)  # B,KVH,G,S,d
+                out_suf = torch.matmul(probs[..., L:].reshape(B, KVH, G, groups * S, S), vs)
+                out = out + out_suf.view(B, KVH, G, groups, S, head_dim)
+            # -> [BG, S, H * d] with head index = kv_head * groups + group (as in eager_attention_forward)
+            return out.permute(0, 2, 4, 1, 3, 5).reshape(BG, S, H * head_dim)
+
+        hidden = suffix_embs
+        for layer_idx in range(self.num_vlm_layers):
+            layer = model_layers[1][layer_idx]
+            if layer is None:
+                continue
+            cache = past_key_values[layer_idx]
+            h = layer.input_layernorm(hidden).to(dtype=layer.self_attn.q_proj.weight.dtype)
+            q = layer.self_attn.q_proj(h).view(BG, S, -1, layer.self_attn.head_dim)
+            is_self_attn = "cross" not in self.attention_mode or (
+                self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0
+            )
+            if is_self_attn:
+                k = layer.self_attn.k_proj(h).view(BG, S, -1, layer.self_attn.head_dim)
+                v = layer.self_attn.v_proj(h).view(BG, S, -1, layer.self_attn.head_dim)
+                q, k = apply_rope(q, self_pos), apply_rope(k, self_pos)
+                att = grouped_attention(q, cache["key_states"], cache["value_states"], k, v)
+            else:
+                pre_k, pre_v = cache["key_states"], cache["value_states"]
+                pre_k = pre_k.to(dtype=layer.self_attn.k_proj.weight.dtype).reshape(B, L, -1)
+                pre_v = pre_v.to(dtype=layer.self_attn.v_proj.weight.dtype).reshape(B, L, -1)
+                k_pre = layer.self_attn.k_proj(pre_k).view(B, L, -1, layer.self_attn.head_dim)
+                v_pre = layer.self_attn.v_proj(pre_v).view(B, L, -1, layer.self_attn.head_dim)
+                q = apply_rope(q, cross_pos)
+                att = grouped_attention(q, k_pre, v_pre)
+            if att.dtype != layer.self_attn.o_proj.weight.dtype:
+                att = att.to(layer.self_attn.o_proj.weight.dtype)
+            out = layer.self_attn.o_proj(att) + hidden
+            hidden = layer.mlp(layer.post_attention_layernorm(out)) + out
+        return expert.norm(hidden)
+
     def eager_attention_forward(self, attention_mask, batch_size, head_dim, query_states, key_states, value_states):
         num_att_heads = self.num_attention_heads
         num_key_value_heads = self.num_key_value_heads
