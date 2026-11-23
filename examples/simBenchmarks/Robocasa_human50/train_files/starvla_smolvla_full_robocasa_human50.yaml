@@ -8,6 +8,7 @@ is_debug: false
 # SmolVLA full fine-tuning, following the official LeRobot `lerobot/smolvla_robocasa`
 # recipe (train_config.json): all weights trainable, chunk_size 50, batch 32,
 # AdamW 1e-4 (0.9, 0.95), 1k warmup, cosine decay to 2.5e-6.
+# Set framework.smolvla.vlm_kv_stopgrad: true for the K/V-hand-off stop-gradient variant.
 framework:
   name: SmolVLA
   action_model:
@@ -20,6 +21,7 @@ framework:
     num_steps: 10         # Euler denoising steps at inference
     freeze_vision_encoder: false
     train_expert_only: false
+    vlm_kv_stopgrad: false
 
 datasets:
   vla_data:

@@ -72,6 +72,9 @@ class SmolVLADefaultConfig:
             "min_period": 4e-3,
             "max_period": 4.0,
             "add_image_special_tokens": False,
+            # StarVLA extension: block upper-layer gradients below each VLM block's K/V
+            # hand-off to the action expert (see SmolVLMWithExpertModel).
+            "vlm_kv_stopgrad": False,
         }
     )
 
@@ -152,6 +155,7 @@ class SmolVLA(baseframework):
             num_vlm_layers=int(sc.num_vlm_layers),
             self_attn_every_n_layers=int(sc.self_attn_every_n_layers),
             expert_width_multiplier=float(sc.expert_width_multiplier),
+            vlm_kv_stopgrad=bool(sc.get("vlm_kv_stopgrad", False)),
         )
         vlm_hidden = self.vlm_with_expert.config.text_config.hidden_size
         expert_hidden = self.vlm_with_expert.expert_hidden_size

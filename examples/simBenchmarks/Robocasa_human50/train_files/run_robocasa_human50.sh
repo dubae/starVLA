@@ -10,7 +10,7 @@
 #   MODEL_TAG=smolvla NUM_GPUS=8 BATCH=8 MAX_STEPS=60000 \
 #     bash examples/simBenchmarks/Robocasa_human50/train_files/run_robocasa_human50.sh
 # Extra arguments are forwarded to train_starvla.py as config overrides, e.g.
-#   ... run_robocasa_human50.sh --trainer.learning_rate.base 5e-5
+#   ... run_robocasa_human50.sh --framework.smolvla.vlm_kv_stopgrad true
 set -euo pipefail
 
 # ==============================================================

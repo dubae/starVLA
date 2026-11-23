@@ -129,8 +129,22 @@ at ~2.6 it/s (~5.3 h for 50k steps). Evaluate with `N_ACT=50`.
 ```bash
 CONFIG_YAML=examples/simBenchmarks/Robocasa_human50/train_files/starvla_smolvla_full_robocasa_human50.yaml \
 MIXTURE=robocasa_human50_all_chunk50 MODEL_TAG=smolvla_full NUM_GPUS=1 BATCH=32 MAX_STEPS=50000 \
-  bash examples/simBenchmarks/Robocasa_human50/train_files/run_robocasa_human50.sh
+  bash examples/simBenchmarks/Robocasa_human50/train_files/run_robocasa_human50.sh \
+  [--framework.smolvla.vlm_kv_stopgrad true]
 ```
+
+`framework.smolvla.vlm_kv_stopgrad: true` (StarVLA extension) stops upper-layer gradients
+at each VLM block's K/V hand-off to the action expert: LN1 and k/v projections of block l
+(and o_proj/LN2/FFN of block l-1) learn only from the expert's use of K_l/V_l, while the
+o_proj/LN2/FFN of block l still learn from block l+1. Forward values are unchanged; VLM
+`q_proj` gets no gradient and is frozen. `tests/test_smolvla_kv_stopgrad.py` checks the routing.
+
+Result (seed 0, 1x H200 each, 50k steps, 24 tasks x 50 episodes, `N_ACT=50`):
+
+| | step time | final train loss (last 1k) | avg success |
+|---|---|---|---|
+| full FT | 0.382 s | 0.0159 | 30.4% |
+| full FT + `vlm_kv_stopgrad` | 0.374 s | 0.0250 | 27.0% |
 
 All launcher knobs are environment variables (`MIXTURE`, `DATA_ROOT`, `BATCH`, `MAX_STEPS`,
 `SAVE_EVERY`, `RUN_ROOT_DIR`, `RUN_ID`, `STARVLA_ENV`, ...). Mixtures:

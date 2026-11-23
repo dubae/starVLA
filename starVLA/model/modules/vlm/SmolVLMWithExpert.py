@@ -138,8 +138,19 @@ class SmolVLMWithExpertModel(nn.Module):
         num_vlm_layers: int = -1,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
+        vlm_kv_stopgrad: bool = False,
     ):
         super().__init__()
+        # StarVLA extension (not in LeRobot). When True, gradients from upper VLM layers do
+        # not flow below the point where a block hands its K/V to the action expert:
+        #   * the VLM's own attention in block l consumes stop-grad(q, k, v), and its
+        #     residual uses stop-grad(x_l);
+        #   * the K/V given to the expert stay attached.
+        # Hence LN1 + k/v_proj of block l (and o_proj/LN2/FFN of block l-1 below them) are
+        # trained only by the expert's gradient through K_l/V_l, while o_proj/LN2/FFN of
+        # block l still learn from the block above. The VLM q_proj is never handed to the
+        # expert, so it receives no gradient in this mode. Forward values are unchanged.
+        self.vlm_kv_stopgrad = vlm_kv_stopgrad
         if load_vlm_weights:
             self.vlm = AutoModelForImageTextToText.from_pretrained(model_id, low_cpu_mem_usage=True)
             config = self.vlm.config
@@ -222,6 +233,20 @@ class SmolVLMWithExpertModel(nn.Module):
         for name, params in self.lm_expert.named_parameters():
             if "lm_head" in name:
                 params.requires_grad = False
+        if self.vlm_kv_stopgrad and not self.train_expert_only:
+            # q_proj only feeds the VLM's own (stop-gradient) attention: no gradient reaches it.
+            for name, params in self.get_vlm_model().text_model.named_parameters():
+                if "self_attn.q_proj" in name:
+                    params.requires_grad = False
+
+    def _kv_stopgrad_active(self, inputs_embeds) -> bool:
+        return (
+            self.vlm_kv_stopgrad
+            and torch.is_grad_enabled()
+            and len(inputs_embeds) == 2
+            and inputs_embeds[0] is not None
+            and inputs_embeds[1] is not None
+        )
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -289,9 +314,31 @@ class SmolVLMWithExpertModel(nn.Module):
                 key_states = torch.cat([past_key_values[layer_idx]["key_states"], key_states], dim=1)
                 value_states = torch.cat([past_key_values[layer_idx]["value_states"], value_states], dim=1)
 
-        att_output = self.eager_attention_forward(
-            attention_mask, batch_size, head_dim, query_states, key_states, value_states
-        )
+        if self._kv_stopgrad_active(inputs_embeds):
+            # VLM rows attend over stop-grad prefix q/k/v (prefix never attends to the suffix);
+            # expert rows attend over the attached prefix K/V plus their own.
+            prefix_len = inputs_embeds[0].shape[1]
+            prefix_out = self.eager_attention_forward(
+                attention_mask[:, :prefix_len, :prefix_len],
+                batch_size,
+                head_dim,
+                query_states[:, :prefix_len].detach(),
+                key_states[:, :prefix_len].detach(),
+                value_states[:, :prefix_len].detach(),
+            )
+            suffix_out = self.eager_attention_forward(
+                attention_mask[:, prefix_len:, :],
+                batch_size,
+                head_dim,
+                query_states[:, prefix_len:],
+                key_states,
+                value_states,
+            )
+            att_output = torch.cat([prefix_out, suffix_out], dim=1)
+        else:
+            att_output = self.eager_attention_forward(
+                attention_mask, batch_size, head_dim, query_states, key_states, value_states
+            )
         return [att_output], past_key_values
 
     def forward_cross_attn_layer(
@@ -329,8 +376,16 @@ class SmolVLMWithExpertModel(nn.Module):
             query_states = apply_rope(query_state, position_id)
             key_states = apply_rope(key_state, position_id)
 
+            # The expert below consumes the attached key/value_states; with vlm_kv_stopgrad the
+            # VLM's own attention uses stop-grad copies (see __init__).
+            sg = self._kv_stopgrad_active(inputs_embeds)
             att_output = self.eager_attention_forward(
-                prefix_attention_mask, batch_size, head_dim, query_states, key_states, value_states
+                prefix_attention_mask,
+                batch_size,
+                head_dim,
+                query_states.detach() if sg else query_states,
+                key_states.detach() if sg else key_states,
+                value_states.detach() if sg else value_states,
             )
             att_outputs.append(att_output)
         else:
@@ -416,6 +471,7 @@ class SmolVLMWithExpertModel(nn.Module):
 
         num_layers = self.num_vlm_layers
         head_dim = self.vlm.config.text_config.head_dim
+        kv_stopgrad = self._kv_stopgrad_active(inputs_embeds)
         for layer_idx in range(num_layers):
             if (
                 fill_kv_cache
@@ -460,7 +516,9 @@ class SmolVLMWithExpertModel(nn.Module):
                     if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
                         att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
                     out_emb = layer.self_attn.o_proj(att_output[:, start:end])
-                    out_emb += hidden_states
+                    # vlm_kv_stopgrad: the VLM residual does not pass upper-layer gradient below
+                    # this block's K/V hand-off point.
+                    out_emb = out_emb + (hidden_states.detach() if (kv_stopgrad and i == 0) else hidden_states)
                     after_first_residual = out_emb.clone()
                     out_emb = layer.post_attention_layernorm(out_emb)
                     out_emb = layer.mlp(out_emb)
