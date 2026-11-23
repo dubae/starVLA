@@ -63,3 +63,21 @@ CLIENT_ARGS="--args.unnorm-key new_embodiment" SERVER_GPU_IDS=0 RENDER_GPU_IDS=1
 CKPT=... STARVLA_PYTHON=... LIBERO_PYTHON=... LIBERO_HOME=... \
   bash examples/experiments/bench_forget/eval_files/run_eval_libero.sh
 ```
+
+## Result (seed 42 training / seed 0 RoboCasa eval, 2026-11-23)
+
+| run | train time (1x H200) | final train loss (LIBERO, last 1k) | LIBERO-object | RoboCasa Human-50 |
+|---|---|---|---|---|
+| A (Human-50 only) | — | — | — | 30.4% |
+| B full FT | 2h09 (0.384 s/step) | 0.0125 | 92.4% | **1.5%** |
+| C attention q/k/v/o only (92.7M / 450M params) | 1h48 (0.320 s/step) | 0.0201 | 93.2% | **3.8%** |
+
+RoboCasa per category, A -> B / C: pick-and-place 4.0 -> 0.0 / 0.0, doors 47.5 -> 0.0 / 0.5,
+drawers 82.0 -> 0.0 / 12.0, sink 44.0 -> 6.0 / 14.7, stove 18.0 -> 4.0 / 3.0,
+coffee 10.7 -> 2.7 / 4.0, microwave 72.0 -> 1.0 / 2.0.
+
+Evaluation sanity check (2x2 weights x eval setup, 6 tasks x the same 25 scenes, closed loop):
+A weights 76.7% with A's setup / 74.7% with B's setup (A's original eval on those scenes: 74.0%);
+B weights 0/150 with either setup. Open loop on Human-50 training demos: arm MAE 0.04 (A
+weights, either setup) vs 0.20 (B weights, either setup). The drop comes from the weights,
+not from the stage-2 evaluation setup.
