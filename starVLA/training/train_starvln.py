@@ -80,6 +80,8 @@ class TrainingArguments(transformers.TrainingArguments):
     )
     mm_projector_lr: Optional[float] = None
     vision_tower_lr: Optional[float] = None
+    # Keep only the latest resumable `checkpoint-*` during training (pass a larger value to keep more).
+    save_total_limit: Optional[int] = field(default=1)
 
     ## Lora config
     lora_enable: bool = field(default=False)
@@ -246,6 +248,16 @@ def train(attn_implementation="flash_attention_2"):
     safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
     
     processor.save_pretrained(training_args.output_dir)
+
+    # The final model in output_dir is the inference checkpoint; the resumable
+    # `checkpoint-*` dirs (optimizer / scheduler / RNG state) are no longer needed.
+    if trainer.args.should_save and (training_args.save_total_limit or 0) <= 1:
+        import shutil
+
+        for ckpt_dir in pathlib.Path(training_args.output_dir).glob("checkpoint-*"):
+            if ckpt_dir.is_dir():
+                shutil.rmtree(ckpt_dir)
+                rank0_print(f"Removed training checkpoint {ckpt_dir}")
 
 
 if __name__ == "__main__":

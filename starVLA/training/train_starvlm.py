@@ -174,14 +174,9 @@ class VLAMTrainer(TrainerUtils):
             checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
 
             state_dict = self.accelerator.get_state_dict(self.model)
-            if save_format == "safetensors":
-                from safetensors.torch import save_file
-
-                save_file(state_dict, checkpoint_path + "_model.safetensors")
-            elif save_format == "pt":
-                torch.save(state_dict, checkpoint_path + "_pytorch_model.pt")
-            else:
-                raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
+            ckpt_file = checkpoint_path + ("_model.safetensors" if save_format == "safetensors" else "_pytorch_model.pt")
+            self._save_state_dict(state_dict, ckpt_file, save_format)
+            self._prune_step_checkpoints(keep=ckpt_file)  # keep only the latest step checkpoint
 
             summary_data = {"steps": self.completed_steps}
             with open(os.path.join(self.config.output_dir, "summary.jsonl"), "a") as f:
@@ -302,15 +297,11 @@ class VLAMTrainer(TrainerUtils):
             final_checkpoint = os.path.join(self.config.output_dir, "final_model")
             os.makedirs(final_checkpoint, exist_ok=True)
             state_dict = self.accelerator.get_state_dict(self.model)
-            if save_format == "safetensors":
-                from safetensors.torch import save_file
-
-                save_file(state_dict, os.path.join(final_checkpoint, "model.safetensors"))
-            elif save_format == "pt":
-                torch.save(state_dict, os.path.join(final_checkpoint, "pytorch_model.pt"))
-            else:
-                raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
+            final_file = os.path.join(final_checkpoint, "model.safetensors" if save_format == "safetensors" else "pytorch_model.pt")
+            self._save_state_dict(state_dict, final_file, save_format)
             logger.info(f"Training complete. Final model saved at {final_checkpoint}")
+            # final_model/ (weights only, no optimizer state) is the single inference checkpoint
+            self._prune_step_checkpoints(keep=None)
 
         if self.accelerator.is_main_process:
             wandb.finish()

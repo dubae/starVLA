@@ -538,6 +538,42 @@ class TrainerUtils:
         self.accelerator.print(f"Latest checkpoint found: {latest_checkpoint_path}")
         return latest_checkpoint_path, completed_steps
 
+    @staticmethod
+    def _save_state_dict(state_dict, file_path, save_format):
+        """Write model weights (inference checkpoint) atomically: a crash mid-write never
+        leaves a truncated file under the final name (resume picks the newest file)."""
+        tmp_path = file_path + ".tmp"
+        if save_format == "safetensors":
+            from safetensors.torch import save_file
+
+            save_file(state_dict, tmp_path)
+        elif save_format == "pt":
+            torch.save(state_dict, tmp_path)
+        else:
+            raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
+        os.replace(tmp_path, file_path)
+
+    def _prune_step_checkpoints(self, keep=None):
+        """Delete ``checkpoints/steps_*`` weight files except ``keep`` (main process only).
+
+        Called after every save (only the latest step checkpoint is kept during training)
+        and after the final model is written (all step checkpoints are removed, leaving
+        ``final_model/`` as the single inference checkpoint). Set
+        ``trainer.keep_all_checkpoints: true`` to keep every checkpoint instead.
+        """
+        if getattr(self.config.trainer, "keep_all_checkpoints", False):
+            return
+        keep = os.path.abspath(keep) if keep else None
+        for name in os.listdir(self.checkpoint_dir):
+            path = os.path.join(self.checkpoint_dir, name)
+            if (
+                re.match(r"steps_(\d+)_(?:pytorch_model\.pt|model\.safetensors)(?:\.tmp)?$", name)
+                and os.path.isfile(path)
+                and os.path.abspath(path) != keep
+            ):
+                os.remove(path)
+                self.accelerator.print(f"🗑️  Removed old checkpoint {path}")
+
 import os
 
 
