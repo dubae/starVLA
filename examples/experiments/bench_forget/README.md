@@ -71,10 +71,12 @@ CKPT=... STARVLA_PYTHON=... LIBERO_PYTHON=... LIBERO_HOME=... \
 | A (Human-50 only) | — | — | — | 30.4% |
 | B full FT | 2h09 (0.384 s/step) | 0.0125 | 92.4% | **1.5%** |
 | C attention q/k/v/o only (92.7M / 450M params) | 1h48 (0.320 s/step) | 0.0201 | 93.2% | **3.8%** |
+| D MLP gate/up (+ SigLIP fc1) only (149.3M params), 2 GPUs x batch 16 | 1h09 (0.213 s/step) | 0.0210 | 90.4% | **7.0%** |
 
 RoboCasa per category, A -> B / C: pick-and-place 4.0 -> 0.0 / 0.0, doors 47.5 -> 0.0 / 0.5,
 drawers 82.0 -> 0.0 / 12.0, sink 44.0 -> 6.0 / 14.7, stove 18.0 -> 4.0 / 3.0,
-coffee 10.7 -> 2.7 / 4.0, microwave 72.0 -> 1.0 / 2.0.
+coffee 10.7 -> 2.7 / 4.0, microwave 72.0 -> 1.0 / 2.0. D: drawers 41.0 (CloseDrawer 80), sink 21.3,
+coffee 6.0, stove 1.0, doors 0.0, microwave 0.0, pick-and-place 0.2.
 
 Evaluation sanity check (2x2 weights x eval setup, 6 tasks x the same 25 scenes, closed loop):
 A weights 76.7% with A's setup / 74.7% with B's setup (A's original eval on those scenes: 74.0%);
