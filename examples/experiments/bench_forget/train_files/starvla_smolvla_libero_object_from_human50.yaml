@@ -1,0 +1,66 @@
+run_id: bench_forget_B_full
+run_root_dir: playground/Checkpoints
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_bench_forget
+is_debug: false
+
+# bench_forget stage 2: continue the Human-50 SmolVLA (run A, 50k full FT) on LIBERO-object,
+# with LIBERO written in the RoboCasa layout (12-D action, 16-D state, 3 views, chunk 50).
+# Same optimizer recipe as run A; 20k steps; only the final model is kept.
+#   B: full fine-tuning (this file as is)
+#   C: + --trainer.trainable_param_regex "<attention q/k/v/o>" (see README)
+framework:
+  name: SmolVLA
+  action_model:
+    action_dim: 12
+    action_horizon: 50
+  smolvla:
+    vlm_model_name: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
+    pretrained_policy_path: lerobot/smolvla_base   # architecture/init; overwritten by trainer.pretrained_checkpoint
+    num_images: 3
+    num_steps: 10
+    freeze_vision_encoder: false
+    train_expert_only: false
+    mask_blank_images: true   # LIBERO has no right agentview: that slot is blank and masked
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    include_state: true
+    data_root_dir: playground/Datasets/libero_robocasa_layout
+    data_mix: libero_object_robocasa_layout_chunk50
+    action_type: delta_ee
+    sequential_step_sampling: false
+    per_device_batch_size: 32
+    num_workers: 8
+    load_all_data_for_training: true
+    obs_image_size: [224, 224]
+    delete_pause_frame: false
+    video_backend: torchvision_av
+
+trainer:
+  pretrained_checkpoint: playground/Checkpoints/human50_smolvla_full_50k/final_model/pytorch_model.pt
+  max_train_steps: 20000
+  num_warmup_steps: 1000
+  save_interval: 20000     # no intermediate checkpoints; final_model/ is the only one kept
+  eval_interval: 100000
+  learning_rate:
+    base: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 2.5e-06
+  freeze_modules: ''
+  loss_scale:
+    vla: 1.0
+  max_grad_norm: 1.0
+  weight_decay: 1.0e-10
+  logging_frequency: 50
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 1
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-10
