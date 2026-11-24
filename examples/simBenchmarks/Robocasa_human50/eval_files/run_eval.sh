@@ -10,7 +10,8 @@
 #
 # Run from the StarVLA repo root. Env vars: CKPT, TASK, PORT, BASE_PORT, NUM_GPUS, GPU_IDS,
 # SERVER_GPU_IDS, RENDER_GPU_IDS, SERVERS_PER_GPU,
-# N_EPISODES, N_ACT, SEED, MAX_PARALLEL, OVERWRITE, SEND_STATE, STARVLA_ENV / ROBOCASA_ENV (conda env
+# N_EPISODES, N_ACT, SEED, MAX_PARALLEL (capped by the container's cgroup CPU / memory limits;
+# CLIENT_MEM_GB, ALLOW_OVERSUBSCRIBE=1), OVERWRITE, SEND_STATE, STARVLA_ENV / ROBOCASA_ENV (conda env
 # names) or STARVLA_PYTHON / ROBOCASA_PYTHON (interpreter paths),
 # CLIENT_ARGS (extra flags for simulation_env.py, e.g. "--args.n-video-episodes 0"),
 # EPISODE_SHARDS (`all`: split a 500-step task's episodes over this many clients, scaled by
@@ -51,6 +52,23 @@ require_ckpt() {
     echo "CKPT must point to a checkpoint file (got '${CKPT}')" >&2
     exit 1
   fi
+}
+
+container_limits() {  # "<cpus> <mem_GiB>" from cgroup v2 / v1, falling back to the host values
+  local cpus="" mem="" q p
+  if [[ -r /sys/fs/cgroup/cpu.max ]]; then
+    read -r q p < /sys/fs/cgroup/cpu.max; [[ "${q}" != "max" ]] && cpus=$(( q / p ))
+  elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]]; then
+    q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+    (( q > 0 )) && cpus=$(( q / p ))
+  fi
+  for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+    [[ -r "${f}" ]] && mem=$(cat "${f}") && break
+  done
+  local host_mem; host_mem=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) * 1024 ))  # kB -> B (bash: 64-bit)
+  [[ -z "${mem}" || "${mem}" == "max" ]] && mem=${host_mem}
+  (( mem > host_mem )) && mem=${host_mem}  # cgroup v1 reports a huge number when unlimited
+  echo "${cpus:-$(nproc)} $(( mem / 1024 / 1024 / 1024 ))"
 }
 
 CLIENT_THREADS=${CLIENT_THREADS:-1}
@@ -121,7 +139,21 @@ case "${1:-}" in
         CLIENT_JOBS+=("${task} ${i} ${ns}")
       done
     done
+    # Cap concurrent clients by the CONTAINER limits: in a pod, nproc / free report the host
+    # (e.g. 128 cores, 2 TB) while the cgroup allows far less (e.g. 28 CPUs, 480 GiB). Each
+    # client peaks at ~6 GiB RSS (robosuite + kitchen assets); 105 clients exceeded a 480 GiB
+    # limit and the whole pod was OOM-killed mid-eval. CLIENT_MEM_GB tunes the estimate;
+    # an explicit MAX_PARALLEL is still capped unless ALLOW_OVERSUBSCRIBE=1.
+    read -r cg_cpus cg_mem_gb <<< "$(container_limits)"
+    n_srv_total=$(( ${#GPUS[@]} * ${SERVERS_PER_GPU:-1} ))
+    cap_mem=$(( cg_mem_gb * 8 / 10 / ${CLIENT_MEM_GB:-6} ))   # keep 20% headroom
+    cap_cpu=$(( cg_cpus - n_srv_total )); (( cap_cpu < 1 )) && cap_cpu=1
+    cap=$(( cap_mem < cap_cpu ? cap_mem : cap_cpu )); (( cap < 1 )) && cap=1
     MAX_PARALLEL=${MAX_PARALLEL:-${#CLIENT_JOBS[@]}}
+    if (( MAX_PARALLEL > cap )) && [[ "${ALLOW_OVERSUBSCRIBE:-0}" != "1" ]]; then
+      echo "[human50] container limits: ${cg_cpus} CPUs, ${cg_mem_gb} GiB -> MAX_PARALLEL ${MAX_PARALLEL} capped to ${cap}" >&2
+      MAX_PARALLEL=${cap}
+    fi
 
     # A server answers one request at a time; with many clients per GPU, extra replicas
     # (SERVERS_PER_GPU) keep clients from queueing on the policy.

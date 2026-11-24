@@ -172,6 +172,24 @@ MUJOCO_EGL_DEVICE_ID=1 CKPT=... TASK=OpenDrawer N_EPISODES=5 \
 > `MUJOCO_EGL_DEVICE_ID` to a GPU without a server. On a single GPU, `MUJOCO_GL=osmesa`
 > (needs `conda install -c conda-forge "mesalib<25"`) avoids the issue but is ~15x slower.
 
+> [!CAUTION]
+> **Container limits, not host limits.** Inside a pod, `nproc` / `free` / `top` show the
+> *host* (e.g. 128 cores, 2 TB) while the cgroup allows much less (check
+> `/sys/fs/cgroup/cpu.max` and `/sys/fs/cgroup/memory.max`; e.g. 28 CPUs, 480 GiB). Each
+> simulator client peaks at ~6 GiB RSS, so sizing `EPISODE_SHARDS` / `MAX_PARALLEL` from the
+> host (105 clients) OOM-killed the whole pod right after the eval started, twice, with no
+> error in the logs (every process, including the policy servers, just disappeared).
+> `run_eval.sh all` now caps `MAX_PARALLEL` at `min(cgroup CPUs - servers,
+> 0.8 * cgroup memory / CLIENT_MEM_GB)` (`CLIENT_MEM_GB=6`); `ALLOW_OVERSUBSCRIBE=1`
+> disables the cap. Keep the same rule for any other parallel simulator / dataloader job.
+
+> [!NOTE]
+> Only one EGL client per GPU was reliable in our pods: with 8 EGL clients on one H200 (no
+> CUDA process on it) 7 aborted in `mjr_readPixels` and the survivor ran at ~840 ms/step.
+> Since cameras are rendered only on the step before a policy query, OSMesa (`MUJOCO_GL=osmesa
+> LP_NUM_THREADS=1`) runs at ~35 ms/step with `N_ACT=50`, so CPU rendering with one client per
+> core is the robust default for many-client evaluation.
+
 A policy server answers one request at a time; `SERVERS_PER_GPU=<n>` starts replicas so
 24 parallel clients do not queue on the policy. Each result records a per-episode
 reset / policy / simulator time split, summarized in `summary.txt`.
