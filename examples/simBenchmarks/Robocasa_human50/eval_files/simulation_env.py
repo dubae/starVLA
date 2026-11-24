@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import logging
 import time
 from pathlib import Path
@@ -66,6 +67,11 @@ class Args:
     n_video_episodes: int = 3  # save mp4s of the first N episodes (0 disables)
     env_kwargs_json: Optional[str] = None  # JSON dict merged over the official eval env kwargs (ablations only)
     shard_id: int = 0  # run episodes shard_id, shard_id + num_shards, ... (parallel eval of one task)
+    # robosuite renders every camera on every control step, but the policy only sees the
+    # images of the step before a query (every n_action_steps). By default the camera sensors
+    # skip rendering on the other steps; observable timing is untouched, so the images the
+    # policy receives come from the very same render call. Video episodes render every step.
+    render_every_step: bool = os.environ.get("STARVLA_RENDER_EVERY_STEP", "0") == "1"
     num_shards: int = 1
 
 
@@ -109,20 +115,51 @@ def make_env(task: str, seed: int, extra_kwargs: Optional[dict] = None):
     return robosuite.make(env_name=task, **env_kwargs)
 
 
-def run_episode(env, policy: PolicyWarper, horizon: int, video_frames: Optional[list]) -> dict:
+class LazyCameras:
+    """Wraps the camera sensors of a robosuite env so they render only while ``on``.
+
+    Off, a sensor returns its last image (never handed to the policy); the observables'
+    sampling schedule is unchanged. ``rendered_step`` records the control step of the last
+    render so callers can assert that the images they use are fresh. Rewrap after every
+    ``env.reset()`` (a hard reset rebuilds the observables).
+    """
+
+    def __init__(self, env):
+        self.on, self.step, self.rendered_step, self._last = True, 0, -1, {}
+        for name, observable in env._observables.items():
+            if name.endswith("_image") or name.endswith("_depth"):
+                observable._sensor = self._wrap(name, observable._sensor)
+
+    def _wrap(self, name, sensor):
+        def lazy_sensor(obs_cache):
+            if self.on or name not in self._last:
+                self._last[name] = sensor(obs_cache)
+                self.rendered_step = self.step
+            return self._last[name]
+
+        lazy_sensor.__modality__ = sensor.__modality__  # robosuite reads the modality off the sensor
+        return lazy_sensor
+
+
+def run_episode(env, policy: PolicyWarper, horizon: int, video_frames: Optional[list], render_every_step: bool = False) -> dict:
     t_reset = time.perf_counter()
     env.unset_ep_meta()  # sample a fresh scene (as robomimic's rollout does)
     obs = env.reset()
     t_reset = time.perf_counter() - t_reset
+    cams = None if (render_every_step or video_frames is not None) else LazyCameras(env)
     instruction = env.get_ep_meta()["lang"]
     queue: list[np.ndarray] = []
     success, steps, t_policy, t_sim, n_queries = False, 0, 0.0, 0.0, 0
     for steps in range(1, horizon + 1):
         if not queue:
+            if cams is not None and steps > 1 and cams.rendered_step != steps - 1:
+                raise RuntimeError(f"stale camera images at step {steps} (last render at step {cams.rendered_step})")
             t = time.perf_counter()
             queue = list(policy.step(obs, instruction))
             t_policy += time.perf_counter() - t
             n_queries += 1
+        if cams is not None:
+            cams.step, cams.on = steps, len(queue) == 1  # render only on the step before the next query
         t = time.perf_counter()
         obs, _, _, _ = env.step(queue.pop(0))
         t_sim += time.perf_counter() - t
@@ -180,7 +217,7 @@ def main(args: Args) -> None:
     episodes, t0 = [], time.time()
     for ep in ep_ids:
         frames = [] if ep < args.n_video_episodes else None
-        result = run_episode(env, policy, horizon, frames)
+        result = run_episode(env, policy, horizon, frames, args.render_every_step)
         result["episode"] = ep
         episodes.append(result)
         if frames:
