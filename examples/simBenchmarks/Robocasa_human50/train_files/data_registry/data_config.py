@@ -74,12 +74,26 @@ class PandaOmronRoboCasaHuman50Chunk50DataConfig(PandaOmronRoboCasaHuman50DataCo
     action_indices = list(range(50))
 
 
+class PandaOmronRoboCasaHuman50Chunk50FutureDataConfig(PandaOmronRoboCasaHuman50Chunk50DataConfig):
+    """Chunk-50 data plus the camera frames at t + 50 (end of the chunk), packed as ``future_image``
+    for future-latent (forward-dynamics) losses. Frames past the episode end repeat the last frame."""
+
+    video_indices = [0, 50]
+
+    def modality_config(self):
+        config = super().modality_config()
+        config["video"] = ModalityConfig(delta_indices=self.video_indices, modality_keys=self.video_keys)
+        return config
+
+
 _ROBOT_TAG = "panda_omron_robocasa_human50"
 _ROBOT_TAG_CHUNK50 = "panda_omron_robocasa_human50_chunk50"
+_ROBOT_TAG_CHUNK50_FUTURE = "panda_omron_robocasa_human50_chunk50_future50"
 
 ROBOT_TYPE_CONFIG_MAP = {
     _ROBOT_TAG: PandaOmronRoboCasaHuman50DataConfig(),
     _ROBOT_TAG_CHUNK50: PandaOmronRoboCasaHuman50Chunk50DataConfig(),
+    _ROBOT_TAG_CHUNK50_FUTURE: PandaOmronRoboCasaHuman50Chunk50FutureDataConfig(),
 }
 
 
@@ -94,6 +108,8 @@ DATASET_NAMED_MIXTURES = {
     "robocasa_human50_all": _entries(_tasks.HUMAN50_TASKS),
     # 50-step action chunks (framework.action_model.action_horizon: 50)
     "robocasa_human50_all_chunk50": _entries(_tasks.HUMAN50_TASKS, _ROBOT_TAG_CHUNK50),
+    # same + camera frames at t + 50 (`future_image`)
+    "robocasa_human50_all_chunk50_future50": _entries(_tasks.HUMAN50_TASKS, _ROBOT_TAG_CHUNK50_FUTURE),
     "robocasa_human50_pnp": _entries(_PNP),
     "robocasa_human50_non_pnp": _entries(t for t in _tasks.HUMAN50_TASKS if t not in _PNP),
     # Single-task mixtures, e.g. ``robocasa_human50_OpenDrawer`` (smoke tests / per-task baselines).

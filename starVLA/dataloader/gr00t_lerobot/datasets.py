@@ -1398,11 +1398,13 @@ class LeRobotSingleDataset(Dataset):
             if len(image_size) != 2:
                 raise ValueError(f"image_size must be an int or a 2-item sequence, got {image_size!r}")
 
-        step_images = []
+        step_images, future_images = [], []
         for video_key in self.modality_keys["video"]:
             image = data[video_key][0]
             image = Image.fromarray(image).resize(image_size)
             step_images.append(image)
+            if len(data[video_key]) > 1:  # extra video delta index: the last one is a future frame
+                future_images.append(Image.fromarray(data[video_key][-1]).resize(image_size))
 
         language = data[self.modality_keys["language"][0]][0]
         action = []
@@ -1416,6 +1418,8 @@ class LeRobotSingleDataset(Dataset):
             "lang": language,
             "robot_tag": self.tag
         }
+        if future_images:
+            sample["future_image"] = future_images
 
         if self.data_cfg is not None and self.data_cfg.get("include_state", False) not in ["False", False]:
             state = []

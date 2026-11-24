@@ -85,6 +85,14 @@ class SmolVLADefaultConfig:
             # torch.compile the VLM / expert passes of the drift objective in training (static
             # shapes; ~25% faster step). Inference always runs eagerly. Needs a C compiler (CC).
             "torch_compile": False,
+            # Forward-dynamics (fd) auxiliary loss: a small predictor f(a_gt, o_t) regresses the
+            # vision latents (SigLIP + connector, the tokens the VLM consumes) of the frames at the
+            # end of the chunk, L2 to a stop-gradient target from the same (trained) encoder.
+            # Needs `future_image` in the batch (e.g. mixture robocasa_human50_all_chunk50_future50).
+            "fd_loss_weight": 0.0,  # 0 disables the predictor entirely
+            "fd_hidden": 512,
+            "fd_layers": 4,
+            "fd_heads": 8,
         }
     )
 
@@ -127,6 +135,33 @@ def pad_tensor(tensor: torch.Tensor, max_len: int, pad_value=0) -> torch.Tensor:
     return padded
 
 
+class ForwardLatentPredictor(nn.Module):
+    """f(a, z_t) -> z_{t+H}: transformer over [current image tokens, action tokens]; the outputs at
+    the image-token positions are the predicted future image tokens."""
+
+    def __init__(self, latent_dim: int, action_dim: int, chunk_size: int, hidden: int, layers: int, heads: int,
+                 max_img_tokens: int = 1024):
+        super().__init__()
+        self.latent_in = nn.Linear(latent_dim, hidden)
+        self.action_in = nn.Linear(action_dim, hidden)
+        self.img_pos = nn.Parameter(torch.zeros(1, max_img_tokens, hidden))
+        self.act_pos = nn.Parameter(torch.zeros(1, chunk_size, hidden))
+        nn.init.normal_(self.img_pos, std=0.02)
+        nn.init.normal_(self.act_pos, std=0.02)
+        layer = nn.TransformerEncoderLayer(hidden, heads, 4 * hidden, dropout=0.0, activation="gelu",
+                                           batch_first=True, norm_first=True)
+        self.blocks = nn.TransformerEncoder(layer, layers)
+        self.norm = nn.LayerNorm(hidden)
+        self.latent_out = nn.Linear(hidden, latent_dim)
+
+    def forward(self, z_t: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        n_img = z_t.shape[1]
+        img = self.latent_in(z_t.to(self.latent_in.weight.dtype)) + self.img_pos[:, :n_img]
+        act = self.action_in(actions.to(self.action_in.weight.dtype)) + self.act_pos[:, : actions.shape[1]]
+        h = self.blocks(torch.cat([img, act], dim=1))
+        return self.latent_out(self.norm(h[:, :n_img]))
+
+
 @FRAMEWORK_REGISTRY.register("SmolVLA")
 class SmolVLA(baseframework):
     """SmolVLA exposed through the StarVLA framework API."""
@@ -158,6 +193,8 @@ class SmolVLA(baseframework):
         self.drift_R_list = tuple(float(r) for r in sc.get("drift_R_list", (0.02, 0.05, 0.2)))
         self.torch_compile = bool(sc.get("torch_compile", False))
         self._compiled_fns = {}
+        self.fd_loss_weight = float(sc.get("fd_loss_weight", 0.0))
+        self._captured_img_embs = None  # set to a list to capture o_t image latents in embed_prefix
         if self.action_dim > self.max_action_dim:
             raise ValueError(f"action_dim={self.action_dim} exceeds max_action_dim={self.max_action_dim}")
 
@@ -189,6 +226,16 @@ class SmolVLA(baseframework):
         global_image_token = tokenizer.convert_tokens_to_ids("<global-img>")
         self.global_image_start_token = torch.tensor([fake_image_token, global_image_token], dtype=torch.long)
         self.image_end_token = torch.tensor([fake_image_token], dtype=torch.long)
+
+        if self.fd_loss_weight > 0:
+            self.fd_predictor = ForwardLatentPredictor(
+                latent_dim=vlm_hidden,
+                action_dim=self.action_dim,
+                chunk_size=self.chunk_size,
+                hidden=int(sc.get("fd_hidden", 512)),
+                layers=int(sc.get("fd_layers", 4)),
+                heads=int(sc.get("fd_heads", 8)),
+            )
 
         # Building SmolVLM from its config inherits the config's bf16 dtype for some
         # sub-modules; keep fp32 master weights (trainer / server cast as configured).
@@ -233,6 +280,7 @@ class SmolVLA(baseframework):
             raise ValueError(
                 f"[SmolVLA] shape mismatch vs {path} (check framework.smolvla config): {shape_mismatch[:5]}"
             )
+        missing = [k for k in missing if not k.startswith("fd_predictor.")]  # new module, not in LeRobot ckpts
         if missing:
             raise ValueError(f"[SmolVLA] checkpoint {path} is missing {len(missing)} tensors, e.g. {missing[:5]}")
         return self
@@ -329,6 +377,8 @@ class SmolVLA(baseframework):
                 att_masks += [0] * start_token.shape[1]
 
             img_emb = self.vlm_with_expert.embed_image(img)
+            if self._captured_img_embs is not None:
+                self._captured_img_embs.append(img_emb)
             img_emb = img_emb * torch.tensor(img_emb.shape[-1] ** 0.5, dtype=img_emb.dtype, device=img_emb.device)
             num_img_embs = img_emb.shape[1]
             embs.append(img_emb)
@@ -481,6 +531,15 @@ class SmolVLA(baseframework):
             values = torch.stack([v.float() for v in metrics.values()]).tolist()  # one host sync
         return loss.mean(), dict(zip(metrics.keys(), values))
 
+    def compute_fd_loss(self, examples, current_img_embs, actions):
+        """L2( sg(z_{t+H}), f(a_gt, z_t) ) with z = embed_image (SigLIP + connector) per camera."""
+        future_images, _ = self._prepare_images([{"image": ex["future_image"]} for ex in examples])
+        with torch.no_grad():  # stop-gradient target from the same, trained encoder
+            target = torch.cat([self.vlm_with_expert.embed_image(img) for img in future_images], dim=1)
+        z_t = torch.cat(current_img_embs, dim=1)
+        pred = self.fd_predictor(z_t, actions[:, :, : self.action_dim])
+        return F.mse_loss(pred.float(), target.float())
+
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, num_steps=None):
         bsize, device = state.shape[0], state.device
         num_steps = int(num_steps or self.num_steps)
@@ -539,7 +598,17 @@ class SmolVLA(baseframework):
         state = self._prepare_state(examples)
         actions = self._prepare_actions(examples)
         if self.objective == "drift":
-            loss, metrics = self.compute_drift_loss(images, img_masks, lang_tokens, lang_masks, state, actions)
+            use_fd = self.fd_loss_weight > 0 and "future_image" in examples[0]
+            self._captured_img_embs = [] if use_fd else None
+            try:
+                loss, metrics = self.compute_drift_loss(images, img_masks, lang_tokens, lang_masks, state, actions)
+                if use_fd:
+                    fd_loss = self.compute_fd_loss(examples, self._captured_img_embs, actions)
+                    metrics["drift/drift_loss"] = loss.item()
+                    metrics["fd/loss"] = fd_loss.item()
+                    loss = loss + self.fd_loss_weight * fd_loss
+            finally:
+                self._captured_img_embs = None
             return {"action_loss": loss, "metrics": metrics}
         losses = self.compute_flow_loss(
             images,
