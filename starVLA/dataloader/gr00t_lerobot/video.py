@@ -14,12 +14,27 @@
 # limitations under the License.
 
 
+import os
+
 import av
 import cv2
 import numpy as np
 
 import torch  # noqa: F401 # isort: skip
 import torchvision  # noqa: F401 # isort: skip
+
+
+# FFmpeg's default ("auto") decoder threading spawns about one thread per core for every
+# opened clip; for short low-resolution clips decoded one frame at a time in dataloader
+# workers that is ~7x slower (22 vs 3 ms per 256px frame on a 128-core host) and churns
+# thousands of threads. STARVLA_VIDEO_DECODE_THREADS overrides (0 = FFmpeg auto).
+_DECODE_THREADS = int(os.environ.get("STARVLA_VIDEO_DECODE_THREADS", "1"))
+
+
+def _limit_decode_threads(container) -> None:
+    if _DECODE_THREADS > 0:
+        for stream in container.streams.video:
+            stream.codec_context.thread_count = _DECODE_THREADS
 
 # Import decord with graceful fallback
 try:
@@ -73,6 +88,7 @@ def get_frames_by_indices(
         container = None
         try:
             container = av.open(video_path)
+            _limit_decode_threads(container)
             stream = container.streams.video[0]
             time_base = float(stream.time_base)
             fps = float(stream.average_rate) if stream.average_rate else float(stream.guessed_rate)
@@ -185,6 +201,7 @@ def get_frames_by_timestamps(
         container = None
         try:
             container = av.open(video_path)
+            _limit_decode_threads(container)
             stream = container.streams.video[0]
             
             # Get video properties
@@ -246,6 +263,7 @@ def get_frames_by_timestamps(
         reader = None
         try:
             reader = torchvision.io.VideoReader(video_path, "video")
+            _limit_decode_threads(reader.container)
             
             for target_ts in timestamps:
                 # Reset reader state
@@ -324,6 +342,7 @@ def get_all_frames(
         return frames.data.numpy(), frames.pts_seconds.numpy()
     elif video_backend == "pyav":
         container = av.open(video_path)
+        _limit_decode_threads(container)
         frames = []
         for frame in container.decode(video=0):
             frame = frame.to_ndarray(format="rgb24")
@@ -333,6 +352,7 @@ def get_all_frames(
         # set backend and reader
         torchvision.set_video_backend("pyav")
         reader = torchvision.io.VideoReader(video_path, "video")
+        _limit_decode_threads(reader.container)
         frames = []
         for frame in reader:
             frames.append(frame["data"].numpy())

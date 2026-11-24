@@ -12,6 +12,9 @@
 # Extra arguments are forwarded to train_starvla.py as config overrides, e.g.
 #   ... run_robocasa_human50.sh --trainer.learning_rate.base 5e-5
 set -euo pipefail
+# Cap CPU threads of the trainer processes: the training step does no heavy CPU math, and
+# idle OpenMP pools (one thread per core by default) only contend with the GPU feeder.
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8} MKL_NUM_THREADS=${MKL_NUM_THREADS:-8}
 
 # ==============================================================
 #  Platform-specific settings — adjust these for YOUR cluster
