@@ -12,7 +12,9 @@ is_debug: false
 # `drift_num_gen` chunks (VLM prefix computed once, K/V shared), which are attracted to the
 # ground-truth chunk and repel each other (generated samples are the negatives). 1 NFE at eval.
 # + forward-dynamics loss: f(a_gt, z_t) regresses sg(z_{t+50}), the vision latents (SigLIP +
-# connector, trained, not frozen) of the camera frames at the end of the chunk (L2, weight 1).
+# connector, trained, not frozen) of the camera frames at the end of the chunk. Target and prediction
+# are LayerNorm-ed per token before the L2 (without it the loss ran away: 19 -> 6000 in 6k steps).
+# Weight 100: at init the drift loss' gradient norm on the shared weights is ~100x the fd loss'.
 framework:
   name: SmolVLA
   action_model:
@@ -28,7 +30,8 @@ framework:
     objective: drift
     drift_num_gen: 16
     drift_R_list: [0.02, 0.05, 0.2]
-    fd_loss_weight: 1.0   # loss = drift + fd_loss_weight * L2(sg(z_{t+50}), f(a_gt, z_t))
+    fd_loss_weight: 100.0  # loss = drift + w * L2(LN(sg(z_{t+50})), LN(f(a_gt, z_t)))
+    fd_layernorm: true
     fd_hidden: 512
     fd_layers: 4
     fd_heads: 8

@@ -90,6 +90,9 @@ class SmolVLADefaultConfig:
             # end of the chunk, L2 to a stop-gradient target from the same (trained) encoder.
             # Needs `future_image` in the batch (e.g. mixture robocasa_human50_all_chunk50_future50).
             "fd_loss_weight": 0.0,  # 0 disables the predictor entirely
+            # LayerNorm (no affine) on target and prediction per token before the L2, as in V-JEPA:
+            # keeps the loss scale fixed while the (trained) encoder's latent scale moves.
+            "fd_layernorm": False,
             "fd_hidden": 512,
             "fd_layers": 4,
             "fd_heads": 8,
@@ -194,6 +197,7 @@ class SmolVLA(baseframework):
         self.torch_compile = bool(sc.get("torch_compile", False))
         self._compiled_fns = {}
         self.fd_loss_weight = float(sc.get("fd_loss_weight", 0.0))
+        self.fd_layernorm = bool(sc.get("fd_layernorm", False))
         self._captured_img_embs = None  # set to a list to capture o_t image latents in embed_prefix
         if self.action_dim > self.max_action_dim:
             raise ValueError(f"action_dim={self.action_dim} exceeds max_action_dim={self.max_action_dim}")
@@ -537,8 +541,12 @@ class SmolVLA(baseframework):
         with torch.no_grad():  # stop-gradient target from the same, trained encoder
             target = torch.cat([self.vlm_with_expert.embed_image(img) for img in future_images], dim=1)
         z_t = torch.cat(current_img_embs, dim=1)
-        pred = self.fd_predictor(z_t, actions[:, :, : self.action_dim])
-        return F.mse_loss(pred.float(), target.float())
+        pred = self.fd_predictor(z_t, actions[:, :, : self.action_dim]).float()
+        target = target.float()
+        if self.fd_layernorm:
+            pred = F.layer_norm(pred, pred.shape[-1:])
+            target = F.layer_norm(target, target.shape[-1:])
+        return F.mse_loss(pred, target)
 
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, num_steps=None):
         bsize, device = state.shape[0], state.device
