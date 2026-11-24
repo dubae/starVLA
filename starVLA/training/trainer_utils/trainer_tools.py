@@ -575,21 +575,37 @@ class TrainerUtils:
             raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
         os.replace(tmp_path, file_path)
 
+    def _save_steps(self):
+        """``trainer.save_steps``: extra steps to checkpoint (e.g. [1000, 5000]); kept after training."""
+        steps = getattr(self.config.trainer, "save_steps", None) or []
+        if isinstance(steps, (int, str)):
+            steps = [steps]
+        return {int(s) for s in steps}
+
+    def _should_save(self):
+        if self.completed_steps <= 0:
+            return False
+        return self.completed_steps % self.config.trainer.save_interval == 0 or self.completed_steps in self._save_steps()
+
     def _prune_step_checkpoints(self, keep=None):
         """Delete ``checkpoints/steps_*`` weight files except ``keep`` (main process only).
 
         Called after every save (only the latest step checkpoint is kept during training)
         and after the final model is written (all step checkpoints are removed, leaving
-        ``final_model/`` as the single inference checkpoint). Set
-        ``trainer.keep_all_checkpoints: true`` to keep every checkpoint instead.
+        ``final_model/`` as the single inference checkpoint). Checkpoints of the steps listed
+        in ``trainer.save_steps`` are always kept. Set ``trainer.keep_all_checkpoints: true``
+        to keep every checkpoint instead.
         """
         if getattr(self.config.trainer, "keep_all_checkpoints", False):
             return
         keep = os.path.abspath(keep) if keep else None
+        pinned = self._save_steps()
         for name in os.listdir(self.checkpoint_dir):
             path = os.path.join(self.checkpoint_dir, name)
+            m = re.match(r"steps_(\d+)_(?:pytorch_model\.pt|model\.safetensors)(?:\.tmp)?$", name)
             if (
-                re.match(r"steps_(\d+)_(?:pytorch_model\.pt|model\.safetensors)(?:\.tmp)?$", name)
+                m
+                and not (int(m.group(1)) in pinned and not name.endswith(".tmp"))
                 and os.path.isfile(path)
                 and os.path.abspath(path) != keep
             ):

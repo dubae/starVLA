@@ -370,7 +370,7 @@ class VLATrainer(TrainerUtils):
             step_metrics["timing/model"] = t_end_model - t_start_model
             self._log_metrics(step_metrics)
 
-            if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
+            if self._should_save():
                 self._save_checkpoint()
 
             if self.completed_steps >= self.config.trainer.max_train_steps:

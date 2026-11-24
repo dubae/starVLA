@@ -313,7 +313,7 @@ class VLAMTrainer(TrainerUtils):
             if optimizer_stepped:
                 self._log_metrics(step_metrics)
 
-            if optimizer_stepped and self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
+            if optimizer_stepped and self._should_save():
                 self._save_checkpoint()
                 if dist.is_initialized():
                     dist.barrier()
