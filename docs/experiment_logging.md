@@ -21,3 +21,12 @@ Notes
 - Launch with `WANDB_MODE=online` (several experiment scripts default to `offline`). `WANDB_MODE=disabled` still skips W&B.
 - Keep one branch per experiment (`exp/<name>`): the branch name in the run name is how runs are grouped.
 - Never commit `.env` or print the key.
+
+Offline runs / results added later
+- `wandb sync --entity duhoe --project starvla_poc <run_dir>/wandb/wandb/offline-run-*`, then rename the
+  run to `{branch}_{run_id}` and attach `config.full.yaml`, `git_branch`, `git_commit`, tags and notes.
+- Evaluation results go on the training run as summary keys `eval_<renderer>/{success_rate,category/*,task/*,protocol}`,
+  a per-task table and an `eval_results` artifact with the raw JSONs. Failed runs are uploaded too, tagged `failed`.
+- Example of both (exp/drift runs, 2026-11-25): `/mnt/nvme/duhoekim/timestep/scripts/wandb_backfill_drift.py` on the training pod.
+
+The same rules are in the repo-root `AGENTS.md` (read by coding agents; `CLAUDE.md` imports it).
