@@ -2,6 +2,12 @@
 
 These rules apply to every agent (Claude Code, Codex, ...) working in this repository, on any branch or machine.
 
+## Experiment branches
+
+`EXPERIMENTS.md` (on `starVLA_dev`) lists every `exp/<name>` branch: the question, the change,
+status and results. When you create an experiment branch, add its row on `starVLA_dev` (commit
+prefix `[baseline]`); when results come in, update the row. Keep experiment code on its own branch.
+
 ## Experiment logging: W&B (mandatory)
 
 Every training run is logged to the team W&B on CoreWeave Forge:
