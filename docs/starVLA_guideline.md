@@ -273,7 +273,7 @@ bash examples/simBenchmarks/LIBERO/train_files/run_libero_train.sh
 ### What to expect
 
 - Checkpoints are saved to `results/Checkpoints/{run_id}/checkpoints/`
-- Training logs go to W&B (set `WANDB_MODE=disabled` to skip)
+- Training logs go to the team W&B `duhoe/starvla_poc` on forge.coreweave.com, run name `{git branch}_{run_id}`, key from `.env` `WANDB_KEY` — see [experiment_logging.md](experiment_logging.md) (set `WANDB_MODE=disabled` to skip)
 - The script copies itself to the output directory for reproducibility
 - With 8× A100/H800 GPUs, training on `libero_all` takes roughly 30K steps (~10 epochs)
 

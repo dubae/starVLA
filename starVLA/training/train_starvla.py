@@ -45,6 +45,7 @@ from starVLA.dataloader import build_dataloader
 from starVLA.model.framework.base_framework import build_framework
 from starVLA.model.framework.share_tools import apply_config_compat
 from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, wrap_config
+from starVLA.training.trainer_utils.team_wandb import team_wandb_init_kwargs
 from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, apply_trainable_param_regex, build_param_lr_groups, setup_optimizer_and_scheduler, normalize_dotlist_args
 
 deepspeed_plugin = None if os.environ.get("STARVLA_DISABLE_DEEPSPEED") == "1" else DeepSpeedPlugin()
@@ -189,13 +190,19 @@ class VLATrainer(TrainerUtils):
             return
         if self.accelerator.is_main_process:
             try:
+                # Team convention (docs/experiment_logging.md): forge.coreweave.com duhoe/starvla_poc,
+                # run name "{git branch}_{run_id}", API key from the repo-root .env (WANDB_KEY).
+                wandb_kwargs = team_wandb_init_kwargs(self.config.run_id)
                 wandb.init(
-                    name=self.config.run_id,
+                    **wandb_kwargs,
                     dir=os.path.join(self.config.output_dir, "wandb"),
-                    project=self.config.wandb_project,
-                    entity=self.config.wandb_entity,
                     group="vla-train",
+                    config=OmegaConf.to_container(
+                        self.config.unwrap() if isinstance(self.config, AccessTrackedConfig) else self.config,
+                        resolve=True,
+                    ),
                 )
+                logger.info(f"W&B run: {wandb_kwargs['entity']}/{wandb_kwargs['project']} {wandb_kwargs['name']}")
                 self._wandb_enabled = True
             except Exception as exc:
                 logger.warning(f"W&B init failed; continuing without W&B: {exc}")
