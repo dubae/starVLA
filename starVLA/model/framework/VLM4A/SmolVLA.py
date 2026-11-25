@@ -60,6 +60,13 @@ class SmolVLADefaultConfig:
             "tokenizer_max_length": 48,
             "pad_language_to": "max_length",
             "num_steps": 10,
+            # Flow-matching training time distribution:
+            #   "beta"     = LeRobot default, t ~ 0.999 * Beta(1.5, 1) + 0.001 (continuous on (0, 1]).
+            #   "discrete" = only the times the Euler sampler visits at inference,
+            #                t ~ Uniform{1/N, 2/N, ..., 1} with N = train_num_steps
+            #                (N=10 -> 0.1 grid, N=4 -> 0.25 grid). t=0 is never queried.
+            "time_sampling": "beta",
+            "train_num_steps": None,  # None -> num_steps
             "freeze_vision_encoder": True,
             "train_expert_only": True,
             "train_state_proj": True,
@@ -137,6 +144,11 @@ class SmolVLA(baseframework):
         self.tokenizer_max_length = int(sc.tokenizer_max_length)
         self.pad_language_to = str(sc.pad_language_to)
         self.num_steps = int(sc.num_steps)
+        self.time_sampling = str(sc.get("time_sampling", "beta"))
+        if self.time_sampling not in ("beta", "discrete"):
+            raise ValueError(f"unknown time_sampling={self.time_sampling!r} (beta | discrete)")
+        train_num_steps = sc.get("train_num_steps", None)
+        self.train_num_steps = int(train_num_steps) if train_num_steps else self.num_steps
         self.min_period = float(sc.min_period)
         self.max_period = float(sc.max_period)
         self.prefix_length = int(sc.prefix_length)
@@ -369,6 +381,11 @@ class SmolVLA(baseframework):
         return self.action_out_proj(suffix_out.to(self.action_out_proj.weight.dtype)).float()
 
     def sample_time(self, bsize, device):
+        if self.time_sampling == "discrete":
+            # Same grid as sample_actions: t_step = 1 - step / N, step = 0..N-1.
+            n = self.train_num_steps
+            k = torch.randint(1, n + 1, (bsize,), device=device)
+            return k.to(torch.float32) / n
         beta = torch.distributions.Beta(torch.tensor(1.5), torch.tensor(1.0))
         return (beta.sample((bsize,)) * 0.999 + 0.001).to(device=device, dtype=torch.float32)
 
