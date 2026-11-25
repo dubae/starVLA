@@ -14,7 +14,7 @@ W&B: https://forge.coreweave.com/wandb/duhoe/starvla_poc, runs named `{branch}_{
 | `exp/smolvla-kv-stopgrad` | Does cutting upper-layer gradients at the VLM -> expert K/V hand-off help? | `framework.smolvla.vlm_kv_stopgrad: true` (VLM q_proj frozen; forward unchanged) | done (2026-11-23) | 27.0% (vs 30.4%) |
 | `exp/bench-forget` | Does continuing on LIBERO-object erase RoboCasa skills? | stage 2 from A on LIBERO-object, 20k steps: B full / C attention q,k,v,o only / D MLP gate,up only | done (2026-11-25) | B 1.5%, C 3.8%, D 7.0% (LIBERO-object 92.4 / 93.2 / 90.4%); most of the drop happens in the first 1k steps |
 | `exp/drift` | Can a one-step Drifting generator replace flow matching (1 NFE)? | `objective: drift`, G=16 samples/obs, R=[0.02, 0.05, 0.2] | G16 50k done (2026-11-24); B1 (+ forward-dynamics latent loss) failed twice, in progress | 26.0% (OSMesa); EGL partial 5 tasks 36.4% |
-| `exp/timestep` | Train flow matching only at the timesteps used at inference? | `time_sampling: discrete`, t ~ U{0.1, ..., 1.0} (`train_num_steps: 10`) instead of Beta(1.5, 1) on (0, 1]; 2 GPUs x 16 | training 50k (2026-11-25) | pending |
+| `exp/timestep` | Train flow matching only at the timesteps used at inference? | `time_sampling: discrete`, t ~ U{0.1, ..., 1.0} (`train_num_steps: 10`) instead of Beta(1.5, 1) on (0, 1]; 2 GPUs x 16 | done (2026-11-25) | 30.7% (OSMesa; A 30.3% OSMesa) |
 
 ## Details
 
@@ -57,4 +57,7 @@ LayerNorm (weight 100) the target latent collapsed at 1.2k steps. All three runs
 Flow matching is trained only at the times the Euler sampler visits at inference
 (t = 1, 0.9, ..., 0.1 for 10 steps; 4 steps -> 0.25 grid via `train_num_steps: 4`); t = 0 is never
 queried, so it is never trained. Config `starvla_smolvla_tsdiscrete_robocasa_human50.yaml`.
-W&B run `exp/timestep_human50_smolvla_tsdiscrete10_50k`; eval with 10 Euler steps (OSMesa) after training.
+W&B run `exp/timestep_human50_smolvla_tsdiscrete10_50k`. 50k steps on 2x H200 in 3h35 (3.87 it/s).
+Eval with 10 Euler steps (OSMesa): **30.7%**, i.e. the same as A (OSMesa 30.3%, EGL 30.4%; +-1.3 pp
+standard error over 1,200 episodes). Per category, tsdiscrete vs A: PnP 2.5 / 4.0, Doors 46.5 / 47.5, Drawers 82.0 / 82.0,
+Sink 47.3 / 44.0, Stove 26.0 / 18.0, Coffee 4.7 / 10.7, Microwave 79.0 / 72.0.
