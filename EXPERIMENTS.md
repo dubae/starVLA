@@ -15,7 +15,7 @@ W&B: https://forge.coreweave.com/wandb/duhoe/starvla_poc, runs named `{branch}_{
 | `exp/bench-forget` | Does continuing on LIBERO-object erase RoboCasa skills? | stage 2 from A on LIBERO-object, 20k steps: B full / C attention q,k,v,o only / D MLP gate,up only | done (2026-11-25) | B 1.5%, C 3.8%, D 7.0% (LIBERO-object 92.4 / 93.2 / 90.4%); most of the drop happens in the first 1k steps |
 | `exp/drift` | Can a one-step Drifting generator replace flow matching (1 NFE)? | `objective: drift`, G=16 samples/obs, R=[0.02, 0.05, 0.2] | G16 50k done (2026-11-24); B1 (+ forward-dynamics latent loss) failed twice, in progress | 26.0% (OSMesa); EGL partial 5 tasks 36.4% |
 | `exp/timestep` | Train flow matching only at the timesteps used at inference? | `time_sampling: discrete`, t ~ U{0.1, ..., 1.0} (`train_num_steps: 10`) instead of Beta(1.5, 1) on (0, 1]; 2 GPUs x 16 | done (2026-11-25) | 30.7% (OSMesa; A 30.3% OSMesa) |
-| `exp/cfg` | Does classifier-free guidance on the observation help the VLA policy? | train with p=0.1 null conditioning (vision + language replaced by null tokens together, state kept); sample v = v_null + w (v_cond - v_null) | planned (2026-11-26) | pending (vs A 30.4% EGL / 30.3% OSMesa) |
+| `exp/cfg` | Does classifier-free guidance on the observation help the VLA policy? | train with p=0.1 null conditioning (vision + language replaced by null tokens together, state kept); sample v = v_null + w (v_cond - v_null) | training 50k on 1x H200 (2026-11-26); eval OSMesa at w = 1, 2 | pending (vs A 30.4% EGL / 30.3% OSMesa) |
 
 ## Details
 
@@ -68,4 +68,7 @@ Classifier-free guidance for the flow-matching action expert. Training: per samp
 p = 0.1 the image tokens and the language tokens are replaced by null tokens (both at once; the
 proprio-state token is kept). Inference: the conditional and null prefixes are run as one batch and each
 Euler step uses v = v_null + w (v_cond - v_null) (w = 1: plain conditional sampling). Same recipe as A
-(SmolVLA full FT on Human-50, 50k steps); compared with A on the same protocol. W&B runs `exp/cfg_*`.
+(SmolVLA full FT on Human-50, 50k steps, from `lerobot/smolvla_base`); null tokens are learned vectors (one for
+vision, one for language) and null text uses a fixed-length mask. Config `starvla_smolvla_cfg_robocasa_human50.yaml`,
+test `tests/test_smolvla_cfg.py`. Eval: same protocol as A, OSMesa, guidance w = 1 (no guidance) and w = 2.
+W&B run `exp/cfg_human50_smolvla_cfg_p01_50k`.
