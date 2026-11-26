@@ -63,6 +63,7 @@ class Args:
     send_state: Optional[bool] = None
     unnorm_key: Optional[str] = None
     num_steps: Optional[int] = None  # flow-matching denoising steps override (SmolVLA / PI-style heads)
+    guidance_scale: Optional[float] = None  # classifier-free guidance scale w (exp/cfg); None = model default
     out_dir: Optional[str] = None
     n_video_episodes: int = 3  # save mp4s of the first N episodes (0 disables)
     env_kwargs_json: Optional[str] = None  # JSON dict merged over the official eval env kwargs (ablations only)
@@ -204,6 +205,7 @@ def main(args: Args) -> None:
         n_action_steps=args.n_action_steps,
         send_state=send_state,
         num_steps=args.num_steps,
+        guidance_scale=args.guidance_scale,
     )
     logging.info("[human50] task=%s horizon=%d send_state=%s image_keys=%s server=%s",
                  args.task, horizon, send_state, args.image_keys, policy.server_metadata)

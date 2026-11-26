@@ -1,0 +1,67 @@
+run_id: human50_smolvla_cfg_p01_50k
+run_root_dir: results/Checkpoints
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_robocasa_human50
+is_debug: false
+
+# SmolVLA full fine-tuning, following the official LeRobot `lerobot/smolvla_robocasa`
+# recipe (train_config.json): all weights trainable, chunk_size 50, batch 32,
+# AdamW 1e-4 (0.9, 0.95), 1k warmup, cosine decay to 2.5e-6.
+# exp/cfg: + classifier-free guidance training (image + language tokens -> learned null tokens
+# with probability 0.1, state kept). Guidance scale w is chosen at eval time (--args.guidance-scale).
+framework:
+  name: SmolVLA
+  action_model:
+    action_dim: 12        # eef_pos(3) + eef_rot(3) + gripper_close(1) + base_motion(4) + control_mode(1)
+    action_horizon: 50    # must match PandaOmronRoboCasaHuman50Chunk50DataConfig.action_indices
+  smolvla:
+    vlm_model_name: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
+    pretrained_policy_path: lerobot/smolvla_base
+    num_images: 3         # left agentview, right agentview, eye-in-hand (training registry order)
+    num_steps: 10         # Euler denoising steps at inference
+    freeze_vision_encoder: false
+    train_expert_only: false
+    cfg_drop_prob: 0.1
+    cfg_guidance_scale: 1.0
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    include_state: true   # SmolVLA conditions on proprio state (16-D -> sin/cos 32-D)
+    data_root_dir: playground/Datasets/robocasa_human50
+    data_mix: robocasa_human50_all_chunk50
+    action_type: delta_ee
+    sequential_step_sampling: false
+    per_device_batch_size: 32
+    num_workers: 8
+    load_all_data_for_training: true
+    obs_image_size: [224, 224]
+    delete_pause_frame: false
+    video_backend: torchvision_av
+
+trainer:
+  max_train_steps: 50000
+  num_warmup_steps: 1000
+  save_interval: 10000
+  eval_interval: 5000
+  learning_rate:
+    base: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 2.5e-06
+  freeze_modules: ''
+  loss_scale:
+    vla: 1.0
+  # Under DeepSpeed the clipping value in starVLA/config/deepseeds/ds_config.yaml (1.0) applies.
+  max_grad_norm: 1.0
+  weight_decay: 1.0e-10
+  logging_frequency: 50
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 1
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-10

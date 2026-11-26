@@ -76,6 +76,12 @@ class SmolVLADefaultConfig:
             # have), like LeRobot's padded "empty cameras": the slot keeps its position but the
             # VLM / expert never attend to its tokens.
             "mask_blank_images": False,
+            # Classifier-free guidance (exp/cfg). Training: with probability cfg_drop_prob a sample's
+            # image tokens and language tokens are replaced by learned null tokens (together; the
+            # proprio-state token is kept). Inference: v = v_null + w * (v_cond - v_null) with
+            # w = cfg_guidance_scale (1.0 = plain conditional sampling; predict_action(guidance_scale=)).
+            "cfg_drop_prob": 0.0,
+            "cfg_guidance_scale": 1.0,
         }
     )
 
@@ -142,6 +148,8 @@ class SmolVLA(baseframework):
         self.prefix_length = int(sc.prefix_length)
         self.add_image_special_tokens = bool(sc.add_image_special_tokens)
         self.mask_blank_images = bool(sc.get("mask_blank_images", False))
+        self.cfg_drop_prob = float(sc.get("cfg_drop_prob", 0.0))
+        self.cfg_guidance_scale = float(sc.get("cfg_guidance_scale", 1.0))
         if self.action_dim > self.max_action_dim:
             raise ValueError(f"action_dim={self.action_dim} exceeds max_action_dim={self.max_action_dim}")
 
@@ -161,6 +169,10 @@ class SmolVLA(baseframework):
         vlm_hidden = self.vlm_with_expert.config.text_config.hidden_size
         expert_hidden = self.vlm_with_expert.expert_hidden_size
         self.state_proj = nn.Linear(self.max_state_dim, vlm_hidden)
+        if self.cfg_drop_prob > 0:
+            # learned null tokens (pre-scale, like token embeddings), one for vision and one for language
+            self.cfg_null_image = nn.Parameter(torch.randn(1, 1, vlm_hidden) * 0.02)
+            self.cfg_null_lang = nn.Parameter(torch.randn(1, 1, vlm_hidden) * 0.02)
         self.action_in_proj = nn.Linear(self.max_action_dim, expert_hidden)
         self.action_out_proj = nn.Linear(expert_hidden, self.max_action_dim)
         self.action_time_mlp_in = nn.Linear(expert_hidden * 2, expert_hidden)
@@ -301,8 +313,11 @@ class SmolVLA(baseframework):
     # ------------------------------------------------------------------
     # VLAFlowMatching (ported from LeRobot)
     # ------------------------------------------------------------------
-    def embed_prefix(self, images, img_masks, lang_tokens, lang_masks, state):
+    def embed_prefix(self, images, img_masks, lang_tokens, lang_masks, state, null_mask=None):
+        """``null_mask`` (B,) bool: rows whose image and language tokens become the CFG null tokens."""
         embs, pad_masks, att_masks = [], [], []
+        if null_mask is not None and not hasattr(self, "cfg_null_image"):
+            raise ValueError("null conditioning needs framework.smolvla.cfg_drop_prob > 0 at construction")
         for img, img_mask in zip(images, img_masks, strict=True):
             bsize = img.shape[0]
             if self.add_image_special_tokens:
@@ -314,6 +329,9 @@ class SmolVLA(baseframework):
 
             img_emb = self.vlm_with_expert.embed_image(img)
             img_emb = img_emb * torch.tensor(img_emb.shape[-1] ** 0.5, dtype=img_emb.dtype, device=img_emb.device)
+            if null_mask is not None:
+                null_img = (self.cfg_null_image * img_emb.shape[-1] ** 0.5).to(img_emb.dtype).expand_as(img_emb)
+                img_emb = torch.where(null_mask[:, None, None], null_img, img_emb)
             num_img_embs = img_emb.shape[1]
             embs.append(img_emb)
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
@@ -328,6 +346,11 @@ class SmolVLA(baseframework):
 
         lang_emb = self.vlm_with_expert.embed_language_tokens(lang_tokens)
         lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
+        if null_mask is not None:
+            null_lang = (self.cfg_null_lang * math.sqrt(lang_emb.shape[-1])).to(lang_emb.dtype).expand_as(lang_emb)
+            lang_emb = torch.where(null_mask[:, None, None], null_lang, lang_emb)
+            # fixed-length null text: the padding pattern must not reveal the instruction length
+            lang_masks = torch.where(null_mask[:, None], torch.ones_like(lang_masks), lang_masks)
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
         att_masks += [0] * lang_emb.shape[1]
@@ -372,7 +395,7 @@ class SmolVLA(baseframework):
         beta = torch.distributions.Beta(torch.tensor(1.5), torch.tensor(1.0))
         return (beta.sample((bsize,)) * 0.999 + 0.001).to(device=device, dtype=torch.float32)
 
-    def compute_flow_loss(self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None):
+    def compute_flow_loss(self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None, null_mask=None):
         if noise is None:
             noise = torch.randn_like(actions)
         if time is None:
@@ -382,7 +405,7 @@ class SmolVLA(baseframework):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state
+            images, img_masks, lang_tokens, lang_masks, state, null_mask=null_mask
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
@@ -400,14 +423,22 @@ class SmolVLA(baseframework):
         v_t = self._velocity(suffix_out)
         return F.mse_loss(u_t, v_t, reduction="none")
 
-    def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, num_steps=None):
+    def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, num_steps=None, guidance_scale=None):
         bsize, device = state.shape[0], state.device
         num_steps = int(num_steps or self.num_steps)
         if noise is None:
             noise = torch.randn(bsize, self.chunk_size, self.max_action_dim, dtype=torch.float32, device=device)
+        w = float(self.cfg_guidance_scale if guidance_scale is None else guidance_scale)
+        cfg = w != 1.0
+        null_mask = None
+        if cfg:  # conditional rows first, null rows second, one batch
+            images = [torch.cat([im, im]) for im in images]
+            img_masks = [torch.cat([m, m]) for m in img_masks]
+            lang_tokens, lang_masks, state = (torch.cat([x, x]) for x in (lang_tokens, lang_masks, state))
+            null_mask = torch.cat([torch.zeros(bsize, dtype=torch.bool, device=device), torch.ones(bsize, dtype=torch.bool, device=device)])
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state
+            images, img_masks, lang_tokens, lang_masks, state, null_mask=null_mask
         )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
@@ -423,8 +454,13 @@ class SmolVLA(baseframework):
         dt = -1.0 / num_steps
         x_t = noise
         for step in range(num_steps):
-            time = torch.full((bsize,), 1.0 + step * dt, dtype=torch.float32, device=device)
-            v_t = self.denoise_step(prefix_pad_masks, past_key_values, x_t, time)
+            if cfg:
+                time = torch.full((2 * bsize,), 1.0 + step * dt, dtype=torch.float32, device=device)
+                v_cond, v_null = self.denoise_step(prefix_pad_masks, past_key_values, torch.cat([x_t, x_t]), time).chunk(2)
+                v_t = v_null + w * (v_cond - v_null)
+            else:
+                time = torch.full((bsize,), 1.0 + step * dt, dtype=torch.float32, device=device)
+                v_t = self.denoise_step(prefix_pad_masks, past_key_values, x_t, time)
             x_t = x_t + dt * v_t
         return x_t
 
@@ -454,6 +490,9 @@ class SmolVLA(baseframework):
         lang_tokens, lang_masks = self._prepare_language(examples)
         state = self._prepare_state(examples)
         actions = self._prepare_actions(examples)
+        null_mask = None
+        if self.training and self.cfg_drop_prob > 0:
+            null_mask = torch.rand(state.shape[0], device=state.device) < self.cfg_drop_prob
         losses = self.compute_flow_loss(
             images,
             img_masks,
@@ -463,13 +502,15 @@ class SmolVLA(baseframework):
             actions,
             noise=kwargs.get("noise"),
             time=kwargs.get("time"),
+            null_mask=kwargs.get("null_mask", null_mask),
         )
         # Padded action dims carry no signal; average over the real ones only.
         return {"action_loss": losses[:, :, : self.action_dim].mean()}
 
     @torch.inference_mode()
     def predict_action(self, examples: list[dict] | dict | None = None, **kwargs) -> dict:
-        """Extra kwargs from eval clients (e.g. ``use_ddim``) are ignored; ``num_steps`` overrides Euler steps."""
+        """Extra kwargs from eval clients (e.g. ``use_ddim``) are ignored; ``num_steps`` overrides Euler steps,
+        ``guidance_scale`` the CFG scale w."""
         if not isinstance(examples, list):
             examples = [examples]
         images, img_masks = self._prepare_images(examples)
@@ -483,5 +524,6 @@ class SmolVLA(baseframework):
             state,
             noise=kwargs.get("noise"),
             num_steps=kwargs.get("num_steps"),
+            guidance_scale=kwargs.get("guidance_scale"),
         )
         return {"normalized_actions": actions[:, :, : self.action_dim].float().cpu().numpy()}

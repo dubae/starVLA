@@ -38,6 +38,7 @@ class PolicyWarper:
         send_state: bool = True,
         flip_images: bool = True,
         num_steps: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
     ) -> None:
         self.client = WebsocketClientPolicy(host, port)
         self.server_metadata = self.client.get_server_metadata()
@@ -52,6 +53,7 @@ class PolicyWarper:
         # images were stored upright.
         self.flip_images = flip_images
         self.num_steps = num_steps
+        self.guidance_scale = guidance_scale  # CFG scale w (SmolVLA cfg); None = model default
 
         chunk = int(self.server_metadata.get("action_chunk_size", self.n_action_steps))
         if self.n_action_steps > chunk:
@@ -89,6 +91,8 @@ class PolicyWarper:
         query = {"examples": [example], "do_sample": False, "unnorm_key": self.unnorm_key}
         if self.num_steps is not None:
             query["num_steps"] = self.num_steps
+        if self.guidance_scale is not None:
+            query["guidance_scale"] = self.guidance_scale
         response = self.client.predict_action(query)
         if response.get("status") != "ok":
             raise RuntimeError(f"policy server error: {response.get('error')}")
