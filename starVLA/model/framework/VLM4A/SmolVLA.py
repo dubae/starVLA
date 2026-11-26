@@ -221,6 +221,8 @@ class SmolVLA(baseframework):
             # model is not left in mixed precision (trainer / server cast as configured).
             filtered[key] = value.to(current[key].dtype)
         missing, _ = self.load_state_dict(filtered, strict=False)
+        # CFG null tokens (exp/cfg) are new parameters: they keep their initialization
+        missing = [k for k in missing if not k.startswith("cfg_null_")]
         logger.info(
             f"[SmolVLA] loaded {len(filtered)}/{len(current)} tensors from {path} "
             f"(missing={len(missing)}, ignored={len(state_dict) - len(filtered)}, shape_mismatch={len(shape_mismatch)})"
